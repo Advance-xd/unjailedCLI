@@ -5,7 +5,7 @@ import { c, colorLevel } from "./theme.js";
 // so this renders 14 columns × 6 lines and looks square in a normal terminal font.
 //   B = brand blue, . = transparent (the inside stays blank)
 const PIXELS = [
-  ".BBBBBBBBBBBB.",
+  "BBBBBBBBBBBBBB",
   "B............B",
   "B............B",
   "B............B",
@@ -16,16 +16,16 @@ const PIXELS = [
   "B...BBBBBB...B",
   "B............B",
   "B............B",
-  ".BBBBBBBBBBBB.",
+  "BBBBBBBBBBBBBB",
 ];
 
 const PLAIN = [
-  ".------------.",
+  "+------------+",
   "|            |",
   "|   o    o   |",
   "|   \\____/   |",
   "|            |",
-  "'------------'",
+  "+------------+",
 ];
 
 const hexOf = (p: string) => (p === "B" ? BRAND_BLUE : null);
