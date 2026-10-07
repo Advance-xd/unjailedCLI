@@ -1,0 +1,25 @@
+import fs from "node:fs";
+
+/** The one place to change the API endpoint. Override with UNJAILED_BASE_URL or "baseUrl" in config.json. */
+export const DEFAULT_BASE_URL = "https://unjailedai.com/v1";
+
+/** Used until the user picks one with /model (falls back to the first model the API lists). */
+export const DEFAULT_MODEL = "glm-5.3-uncensored";
+
+export const BRAND_BLUE = "#7DD3FC";
+export const BRAND_DARK = "#0C4A6E";
+
+const timeoutEnv = Number(process.env.UNJAILED_TIMEOUT);
+/** Seconds to wait for the server to respond (and max silence mid-stream × 3). UNJAILED_TIMEOUT overrides. */
+const TIMEOUT_S = Number.isFinite(timeoutEnv) && timeoutEnv > 0 ? timeoutEnv : 30;
+export const REQUEST_TIMEOUT_MS = TIMEOUT_S * 1000; // waiting for response headers
+export const STREAM_IDLE_TIMEOUT_MS = TIMEOUT_S * 3000; // max gap between streamed chunks
+
+export const VERSION: string = (() => {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    return String(pkg.version);
+  } catch {
+    return "0.0.0";
+  }
+})();

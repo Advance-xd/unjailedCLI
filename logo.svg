@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Unjailed AI">
+  <title>Unjailed AI</title>
+  <rect x="8" y="8" width="240" height="240" rx="36" fill="#7DD3FC"/>
+  <rect x="76" y="66" width="28" height="48" rx="6" fill="#0C4A6E"/>
+  <rect x="152" y="66" width="28" height="48" rx="6" fill="#0C4A6E"/>
+  <path d="M60 148 Q128 222 196 148" fill="none" stroke="#0C4A6E" stroke-width="20" stroke-linecap="round"/>
+</svg>

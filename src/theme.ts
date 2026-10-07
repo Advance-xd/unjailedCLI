@@ -1,0 +1,41 @@
+import { Chalk, type ChalkInstance } from "chalk";
+import { BRAND_BLUE, BRAND_DARK } from "./constants.js";
+
+/** 0 = no color, 2 = 256 colors, 3 = truecolor. Honors NO_COLOR and FORCE_COLOR. */
+export function detectColorLevel(env = process.env, isTTY = !!process.stdout.isTTY): 0 | 1 | 2 | 3 {
+  if (env.NO_COLOR !== undefined && env.NO_COLOR !== "") return 0;
+  if (env.FORCE_COLOR !== undefined) {
+    const f = env.FORCE_COLOR;
+    if (f === "0" || f === "false") return 0;
+    if (f === "3") return 3;
+    if (f === "2") return 2;
+    if (f === "1" || f === "" || f === "true") return 1;
+  }
+  if (!isTTY || env.TERM === "dumb") return 0;
+  const ct = (env.COLORTERM ?? "").toLowerCase();
+  if (ct === "truecolor" || ct === "24bit") return 3;
+  // Windows Terminal, VS Code, and modern macOS/Linux terminals all do truecolor.
+  if (env.WT_SESSION || env.TERM_PROGRAM === "vscode" || env.TERM_PROGRAM === "iTerm.app" || env.TERM_PROGRAM === "WezTerm") return 3;
+  if (process.platform === "win32") return 3;
+  if (/kitty|alacritty|ghostty|foot|wezterm/.test(env.TERM ?? "")) return 3;
+  if (/256/.test(env.TERM ?? "")) return 2;
+  return 2;
+}
+
+export const colorLevel = detectColorLevel();
+export const c: ChalkInstance = new Chalk({ level: colorLevel });
+
+export const theme = {
+  brand: (s: string) => c.hex(BRAND_BLUE)(s),
+  brandBold: (s: string) => c.hex(BRAND_BLUE).bold(s),
+  dim: (s: string) => c.gray(s),
+  ok: (s: string) => c.green(s),
+  err: (s: string) => c.red(s),
+  warn: (s: string) => c.yellow(s),
+  bold: (s: string) => c.bold(s),
+  code: (s: string) => c.hex(BRAND_BLUE)(s),
+  dark: BRAND_DARK,
+};
+
+/** Color names for Ink <Text color>; undefined when color is off. */
+export const inkColor = (hex: string) => (colorLevel === 0 ? undefined : hex);

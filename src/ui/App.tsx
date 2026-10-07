@@ -1,0 +1,671 @@
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Box, Static, Text, useApp, useInput, useStdout, type Key } from "ink";
+import { AbortedError, ApiError, listModels, streamChat, type ChatMessage } from "../api.js";
+import { COMMANDS, filterCommands, parseCommand } from "../commands.js";
+import { configPath, deleteKey, maskKey, readConfig, resolveBaseUrl, resolveKey, writeConfig, type KeySource } from "../config.js";
+import { DEFAULT_MODEL } from "../constants.js";
+import { renderMarkdown } from "../markdown.js";
+import { theme } from "../theme.js";
+import { Header } from "./Header.js";
+import { onFirstLine, onLastLine, Prompt, type EditorState } from "./Prompt.js";
+import { SelectList } from "./SelectList.js";
+import { Spinner } from "./Spinner.js";
+
+type Item =
+  | { id: number; kind: "header"; model: string; loggedIn: boolean; keySource: KeySource }
+  | { id: number; kind: "user"; text: string }
+  | { id: number; kind: "assistant"; text: string; first: boolean }
+  | { id: number; kind: "info" | "success" | "error" | "plain"; text: string };
+
+// Omit distributed over the union so each variant keeps its own fields.
+type NewItem = Item extends infer T ? (T extends Item ? Omit<T, "id"> : never) : never;
+
+type Mode =
+  | { type: "chat" }
+  | { type: "login" }
+  | { type: "picker"; models: string[] | null; selected: number };
+
+interface Stream {
+  text: string; // not yet flushed to the transcript
+  started: boolean; // any content received
+  reasoning: boolean;
+  flushed: boolean; // earlier paragraphs already moved to the transcript
+}
+
+const NOT_LOGGED_IN = "Not logged in — type /login";
+const EMPTY: EditorState = { value: "", cursor: 0 };
+
+let nextId = 0;
+const id = () => ++nextId;
+
+function friendly(err: unknown): string {
+  if (err instanceof ApiError) return err.message;
+  return "Something went wrong. Try again.";
+}
+
+/** Index just past the last blank line that is outside a code fence, or -1. */
+function safeFlushPoint(text: string): number {
+  let inFence = false;
+  let point = -1;
+  let offset = 0;
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length - 1; i++) {
+    const line = lines[i]!;
+    if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
+    offset += line.length + 1;
+    if (!inFence && line.trim() === "" && i > 0) point = offset;
+  }
+  return point;
+}
+
+export function App() {
+  const { exit } = useApp();
+  const { stdout } = useStdout();
+
+  const [auth, setAuth] = useState(() => resolveKey());
+  const [baseUrl] = useState(() => resolveBaseUrl());
+  const [model, setModel] = useState(() => process.env.UNJAILED_MODEL || readConfig().model || DEFAULT_MODEL);
+
+  const [items, setItems] = useState<Item[]>(() => [
+    { id: id(), kind: "header", model, loggedIn: !!auth.key, keySource: auth.source },
+  ]);
+  const [staticKey, setStaticKey] = useState(0);
+  const [mode, setMode] = useState<Mode>({ type: "chat" });
+  const [editor, setEditor] = useState<EditorState>(EMPTY);
+  const [slashSel, setSlashSel] = useState(0);
+  const [history, setHistory] = useState<string[]>([]);
+  const [histIdx, setHistIdx] = useState<number | null>(null);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [stream, setStream] = useState<Stream | null>(null);
+  const [flash, setFlash] = useState<string | null>(null);
+
+  const messages = useRef<ChatMessage[]>([]);
+  const abortRef = useRef<AbortController | null>(null);
+  const exitArmed = useRef(false);
+  const flashTimer = useRef<NodeJS.Timeout | undefined>(undefined);
+
+  const push = useCallback((...newItems: NewItem[]) => {
+    setItems((prev) => [...prev, ...newItems.map((it) => ({ ...it, id: id() }) as Item)]);
+  }, []);
+  const info = (text: string) => push({ kind: "info", text });
+  const success = (text: string) => push({ kind: "success", text });
+  const error = (text: string) => push({ kind: "error", text });
+
+  const showFlash = (text: string, ms = 2000) => {
+    setFlash(text);
+    clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => {
+      setFlash(null);
+      exitArmed.current = false;
+    }, ms);
+  };
+
+  // On startup, quietly make sure the saved model still exists.
+  useEffect(() => {
+    if (!auth.key) return;
+    const ctrl = new AbortController();
+    listModels(baseUrl, auth.key, ctrl.signal)
+      .then((models) => {
+        if (ctrl.signal.aborted || models.length === 0) return;
+        setModel((current) => {
+          if (models.some((m) => m.id === current)) return current;
+          const fallback = models[0]!.id;
+          info(`Model "${current}" isn't available — using ${fallback}. Change it with /model.`);
+          return fallback;
+        });
+      })
+      .catch((err) => {
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) error(`Your API key${auth.source === "env" ? " (from UNJAILED_API_KEY)" : ""} was rejected. Type /login to enter a new one.`);
+      });
+    return () => ctrl.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Exit on the next render so the live area (prompt, menus) is cleared first.
+  const [exiting, setExiting] = useState(false);
+  useEffect(() => {
+    if (exiting) exit();
+  }, [exiting, exit]);
+  const quit = () => {
+    abortRef.current?.abort();
+    setExiting(true);
+  };
+
+  // ---------- chat ----------
+
+  const sendChat = async (text: string) => {
+    if (!auth.key) {
+      push({ kind: "user", text });
+      error(NOT_LOGGED_IN);
+      return;
+    }
+    push({ kind: "user", text });
+    messages.current.push({ role: "user", content: text });
+
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    let full = "";
+    let pending = "";
+    let flushedAny = false;
+    let reasoning = false;
+    let timer: NodeJS.Timeout | undefined;
+
+    const sync = () => {
+      timer = undefined;
+      // Move finished paragraphs into the transcript so the live area stays small.
+      const point = safeFlushPoint(pending);
+      if (point > 0) {
+        const done = pending.slice(0, point).replace(/\n+$/, "");
+        pending = pending.slice(point);
+        if (done.trim()) {
+          push({ kind: "assistant", text: done, first: !flushedAny });
+          flushedAny = true;
+        }
+      }
+      setStream({ text: pending, started: full.length > 0, reasoning, flushed: flushedAny });
+    };
+    const schedule = () => {
+      if (!timer) timer = setTimeout(sync, 40);
+    };
+
+    setStream({ text: "", started: false, reasoning: false, flushed: false });
+    let outcome: "done" | "stopped" | "error" = "done";
+    let errMsg = "";
+    try {
+      await streamChat(
+        baseUrl,
+        auth.key,
+        model,
+        messages.current,
+        {
+          onToken: (t) => {
+            full += t;
+            pending += t;
+            schedule();
+          },
+          onReasoning: () => {
+            if (!reasoning) {
+              reasoning = true;
+              schedule();
+            }
+          },
+        },
+        ctrl.signal,
+      );
+    } catch (err) {
+      if (err instanceof AbortedError) outcome = "stopped";
+      else {
+        outcome = "error";
+        errMsg = friendly(err);
+      }
+    } finally {
+      clearTimeout(timer);
+      abortRef.current = null;
+    }
+
+    const rest = pending.replace(/\n+$/, "");
+    if (rest.trim()) push({ kind: "assistant", text: rest, first: !flushedAny });
+    setStream(null);
+
+    if (full.trim()) messages.current.push({ role: "assistant", content: full });
+    else if (outcome !== "done") messages.current.pop(); // nothing came back; don't leave a dangling turn
+
+    if (outcome === "stopped") info("Stopped.");
+    else if (outcome === "error") error(errMsg);
+    else if (!full.trim()) info("(empty response)");
+  };
+
+  // ---------- commands ----------
+
+  const runCommand = async (raw: string) => {
+    const cmd = parseCommand(raw);
+    if (!cmd) return;
+    const known = COMMANDS.find((c) => c.name === cmd.name);
+    if (!known) {
+      error("Unknown command. Type / to see commands.");
+      return;
+    }
+    switch (cmd.name) {
+      case "exit":
+        quit();
+        return;
+      case "help":
+        push({ kind: "plain", text: helpText() });
+        return;
+      case "clear":
+        messages.current = [];
+        stdout.write("\x1b[2J\x1b[3J\x1b[H");
+        setItems([{ id: id(), kind: "header", model, loggedIn: !!auth.key, keySource: auth.source }]);
+        setStaticKey((k) => k + 1);
+        return;
+      case "login":
+        setMode({ type: "login" });
+        setEditor(EMPTY);
+        info("Paste your API key (Esc to cancel). Get one at unjailedai.com/dashboard.");
+        return;
+      case "logout":
+        return logout();
+      case "api":
+        return apiInfo();
+      case "model":
+        return chooseModel(cmd.arg);
+    }
+  };
+
+  const logout = () => {
+    const hadSaved = !!readConfig().apiKey;
+    if (hadSaved) deleteKey();
+    if (process.env.UNJAILED_API_KEY?.trim()) {
+      if (hadSaved) success("Saved key removed.");
+      info("You're still logged in through the UNJAILED_API_KEY environment variable. Unset it to log out completely.");
+      return;
+    }
+    setAuth({ key: null, source: null });
+    if (hadSaved) success(`Logged out. Your key was removed from ${configPath()}.`);
+    else info("You're not logged in.");
+  };
+
+  const apiInfo = async () => {
+    const lines = [
+      `${theme.dim("Base URL ")} ${baseUrl}${process.env.UNJAILED_BASE_URL ? theme.dim("  (UNJAILED_BASE_URL)") : ""}`,
+      `${theme.dim("API key  ")} ${auth.key ? maskKey(auth.key) + theme.dim(auth.source === "env" ? "  (UNJAILED_API_KEY)" : "  (saved)") : "none"}`,
+      `${theme.dim("Model    ")} ${model}`,
+      `${theme.dim("Config   ")} ${configPath()}`,
+    ];
+    push({ kind: "plain", text: lines.join("\n") });
+    if (!auth.key) {
+      error(`Connection not checked. ${NOT_LOGGED_IN}`);
+      return;
+    }
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    setBusy("Checking connection");
+    const t0 = Date.now();
+    try {
+      const models = await listModels(baseUrl, auth.key, ctrl.signal);
+      if (ctrl.signal.aborted) return;
+      const ms = Date.now() - t0;
+      const available = models.some((m) => m.id === model);
+      success(`Connected · ${ms} ms · ${models.length} model${models.length === 1 ? "" : "s"} available`);
+      if (!available) error(`Current model "${model}" isn't in the list. Pick one with /model.`);
+    } catch (err) {
+      if (!ctrl.signal.aborted) error(`Connection failed: ${friendly(err)}`);
+    } finally {
+      abortRef.current = null;
+      setBusy(null);
+    }
+  };
+
+  const setAndSaveModel = (next: string) => {
+    setModel(next);
+    writeConfig({ model: next });
+    success(`Model set to ${next}${messages.current.length ? " · conversation kept" : ""}`);
+  };
+
+  const chooseModel = async (arg: string) => {
+    if (!auth.key) {
+      error(NOT_LOGGED_IN);
+      return;
+    }
+    if (!arg) setMode({ type: "picker", models: null, selected: 0 });
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    if (arg) setBusy("Checking model");
+    try {
+      const ids = (await listModels(baseUrl, auth.key, ctrl.signal)).map((m) => m.id);
+      if (ctrl.signal.aborted) return;
+      if (ids.length === 0) {
+        setMode({ type: "chat" });
+        error("The API returned no models.");
+        return;
+      }
+      if (arg) {
+        const match = ids.find((m) => m === arg) ?? ids.find((m) => m.toLowerCase() === arg.toLowerCase());
+        if (match) setAndSaveModel(match);
+        else error(`No model named "${arg}". Type /model to pick from the list.`);
+        return;
+      }
+      const cur = ids.indexOf(model);
+      setMode({ type: "picker", models: ids, selected: cur >= 0 ? cur : 0 });
+    } catch (err) {
+      if (ctrl.signal.aborted) return;
+      setMode({ type: "chat" });
+      error(`Couldn't load models: ${friendly(err)}`);
+    } finally {
+      abortRef.current = null;
+      setBusy(null);
+    }
+  };
+
+  const submitLogin = async (value: string) => {
+    const key = value.trim();
+    if (!key) {
+      error("No key entered. Paste your API key, or press Esc to cancel.");
+      return;
+    }
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    setBusy("Checking key");
+    try {
+      const models = await listModels(baseUrl, key, ctrl.signal);
+      if (ctrl.signal.aborted) return;
+      writeConfig({ apiKey: key });
+      setEditor(EMPTY);
+      setMode({ type: "chat" });
+      if (process.env.UNJAILED_API_KEY?.trim() && process.env.UNJAILED_API_KEY.trim() !== key) {
+        success(`Logged in · key ${maskKey(key)} saved`);
+        info("Note: UNJAILED_API_KEY is set in your environment and takes priority over the saved key.");
+      } else {
+        setAuth({ key, source: "config" });
+        success(`Logged in · key ${maskKey(key)} saved`);
+      }
+      if (models.length && !models.some((m) => m.id === model)) {
+        const fallback = models.find((m) => m.id === DEFAULT_MODEL)?.id ?? models[0]!.id;
+        setModel(fallback);
+        writeConfig({ model: fallback });
+        info(`Using model ${fallback}. Change it with /model.`);
+      }
+    } catch (err) {
+      if (ctrl.signal.aborted) return;
+      setEditor(EMPTY);
+      const status = err instanceof ApiError ? err.status : undefined;
+      if (status === 401 || status === 403) error("That key was rejected. Check it and paste again, or press Esc to cancel.");
+      else error(`${friendly(err)} Paste the key to retry, or press Esc to cancel.`);
+    } finally {
+      abortRef.current = null;
+      setBusy(null);
+    }
+  };
+
+  // ---------- input ----------
+
+  const slashQuery = mode.type === "chat" && /^\/\S*$/.test(editor.value) ? editor.value.slice(1) : null;
+  const slashMatches = slashQuery !== null ? filterCommands(slashQuery) : [];
+  const menuOpen = slashQuery !== null && !stream && !busy;
+
+  useEffect(() => setSlashSel(0), [slashQuery]);
+
+  const submitChat = (value: string) => {
+    const text = value.replace(/\s+$/, "");
+    if (!text.trim()) return;
+    setHistory((h) => (h[h.length - 1] === text ? h : [...h, text]));
+    setHistIdx(null);
+    setEditor(EMPTY);
+    if (text.startsWith("/")) void runCommand(text);
+    else void sendChat(text);
+  };
+
+  const onSpecialKey = (key: Key, _input: string, state: EditorState): boolean => {
+    if (mode.type === "login") {
+      if (key.escape) {
+        setMode({ type: "chat" });
+        setEditor(EMPTY);
+        info("Login cancelled.");
+        return true;
+      }
+      return false;
+    }
+    if (menuOpen) {
+      const n = slashMatches.length;
+      if (key.upArrow && n) return setSlashSel((s) => (s - 1 + n) % n), true;
+      if (key.downArrow && n) return setSlashSel((s) => (s + 1) % n), true;
+      if (key.escape) return setEditor(EMPTY), true;
+      const chosen = slashMatches[slashSel];
+      if (key.tab && chosen) {
+        const v = `/${chosen.name}${chosen.args ? " " : ""}`;
+        setEditor({ value: v, cursor: v.length });
+        return true;
+      }
+      if (key.return && !key.shift && !key.meta && chosen) {
+        submitChat(`/${chosen.name}`);
+        return true;
+      }
+      return false;
+    }
+    if (key.upArrow && onFirstLine(state) && history.length) {
+      const idx = histIdx === null ? history.length - 1 : Math.max(0, histIdx - 1);
+      if (histIdx === null) setDraft(state.value);
+      setHistIdx(idx);
+      const v = history[idx]!;
+      setEditor({ value: v, cursor: v.length });
+      return true;
+    }
+    if (key.downArrow && onLastLine(state) && histIdx !== null) {
+      const idx = histIdx + 1;
+      const v = idx >= history.length ? draft : history[idx]!;
+      setHistIdx(idx >= history.length ? null : idx);
+      setEditor({ value: v, cursor: v.length });
+      return true;
+    }
+    return false;
+  };
+
+  // Global keys: Ctrl+C stops / cancels / exits, Ctrl+D exits.
+  useInput((input, key) => {
+    if (key.ctrl && input === "c") {
+      if (abortRef.current) {
+        abortRef.current.abort();
+        if (busy) {
+          setBusy(null);
+          info("Cancelled.");
+          if (mode.type === "picker") setMode({ type: "chat" });
+        }
+        return;
+      }
+      if (mode.type !== "chat") {
+        setMode({ type: "chat" });
+        setEditor(EMPTY);
+        return;
+      }
+      if (editor.value) {
+        setEditor(EMPTY);
+        return;
+      }
+      if (exitArmed.current) return quit();
+      exitArmed.current = true;
+      showFlash("Press Ctrl+C again to exit");
+      return;
+    }
+    if (key.ctrl && input === "d" && !editor.value && !stream) quit();
+  });
+
+  // Model picker keys.
+  useInput(
+    (_input, key) => {
+      if (mode.type !== "picker" || !mode.models) {
+        if (key.escape) setMode({ type: "chat" });
+        return;
+      }
+      const n = mode.models.length;
+      if (key.upArrow) setMode({ ...mode, selected: (mode.selected - 1 + n) % n });
+      else if (key.downArrow) setMode({ ...mode, selected: (mode.selected + 1) % n });
+      else if (key.escape) setMode({ type: "chat" });
+      else if (key.return || key.tab) {
+        const next = mode.models[mode.selected]!;
+        setMode({ type: "chat" });
+        if (next === model) info(`Already using ${next}.`);
+        else setAndSaveModel(next);
+      }
+    },
+    { isActive: mode.type === "picker" },
+  );
+
+  // ---------- render ----------
+
+  const width = stdout.columns || 80;
+  const promptActive = (mode.type === "chat" && !stream) || (mode.type === "login" && !busy);
+
+  if (exiting) {
+    return (
+      <Static key={staticKey} items={items}>
+        {(item) => <TranscriptItem key={item.id} item={item} />}
+      </Static>
+    );
+  }
+
+  return (
+    <>
+      <Static key={staticKey} items={items}>
+        {(item) => <TranscriptItem key={item.id} item={item} />}
+      </Static>
+
+      {stream && (
+        <Box flexDirection="column" marginBottom={1}>
+          {stream.text.trim() ? (
+            <AssistantText text={stream.text} first={!stream.flushed} />
+          ) : null}
+          {!stream.started && <Spinner label={stream.reasoning ? "Reasoning" : "Thinking"} />}
+          {stream.started && !stream.text.trim() && <Text>{theme.dim("  …")}</Text>}
+        </Box>
+      )}
+
+      {busy && (
+        <Box marginBottom={1}>
+          <Spinner label={busy} />
+        </Box>
+      )}
+
+      {mode.type === "picker" && (
+        <Box flexDirection="column" marginBottom={1}>
+          <Text>{theme.bold("Select a model")}{theme.dim("  ↑/↓ move · Enter select · Esc cancel")}</Text>
+          {mode.models ? (
+            <SelectList items={mode.models.map((m) => ({ key: m, label: m, current: m === model }))} selected={mode.selected} max={10} />
+          ) : (
+            <Spinner label="Loading models" />
+          )}
+        </Box>
+      )}
+
+      {mode.type !== "picker" && (
+        <Box flexDirection="column">
+          <Text>{theme.dim("─".repeat(Math.max(10, width - 1)))}</Text>
+          <Prompt
+            state={editor}
+            onChange={(s) => {
+              setEditor(s);
+              if (exitArmed.current) {
+                exitArmed.current = false;
+                setFlash(null);
+              }
+            }}
+            onSubmit={mode.type === "login" ? (v) => void submitLogin(v) : submitChat}
+            onSpecialKey={onSpecialKey}
+            mask={mode.type === "login"}
+            label={mode.type === "login" ? "Paste your API key: " : "› "}
+            placeholder={mode.type === "login" ? "" : stream ? "" : 'Message Unjailed, or type "/" for commands'}
+            isActive={promptActive}
+          />
+          <Text>{theme.dim("─".repeat(Math.max(10, width - 1)))}</Text>
+        </Box>
+      )}
+
+      {menuOpen && (
+        <Box flexDirection="column" marginLeft={1}>
+          {slashMatches.length ? (
+            <SelectList
+              items={slashMatches.map((c) => ({ key: c.name, label: `/${c.name}${c.args ? " " + c.args : ""}`, hint: c.description }))}
+              selected={slashSel}
+              max={8}
+            />
+          ) : (
+            <Text>{theme.dim("  No matching commands")}</Text>
+          )}
+        </Box>
+      )}
+
+      <StatusLine model={model} loggedIn={!!auth.key} keyMasked={maskKey(auth.key)} flash={flash} streaming={!!stream} />
+    </>
+  );
+}
+
+function StatusLine({ model, loggedIn, keyMasked, flash, streaming }: { model: string; loggedIn: boolean; keyMasked: string; flash: string | null; streaming: boolean }) {
+  const left = `${theme.brand("◆")} ${model}  ${theme.dim("·")}  ${loggedIn ? theme.ok("● Logged in") + theme.dim(` ${keyMasked}`) : theme.warn("○ Not logged in") + theme.dim(" — type /login")}`;
+  const right = flash ? theme.warn(flash) : theme.dim(streaming ? "Ctrl+C to stop" : "/ for commands");
+  return (
+    <Box justifyContent="space-between" paddingX={1}>
+      <Text wrap="truncate-end">{left}</Text>
+      <Text wrap="truncate-start">{right}</Text>
+    </Box>
+  );
+}
+
+function AssistantText({ text, first }: { text: string; first: boolean }) {
+  return (
+    <Box flexDirection="row">
+      <Box width={2} flexShrink={0}>
+        <Text>{first ? theme.brand("●") : " "}</Text>
+      </Box>
+      <Box flexGrow={1}>
+        <Text>{renderMarkdown(text)}</Text>
+      </Box>
+    </Box>
+  );
+}
+
+function TranscriptItem({ item }: { item: Item }) {
+  switch (item.kind) {
+    case "header":
+      return <Header model={item.model} loggedIn={item.loggedIn} keySource={item.keySource} />;
+    case "user":
+      return (
+        <Box flexDirection="row" marginBottom={1}>
+          <Box width={2} flexShrink={0}>
+            <Text>{theme.dim("›")}</Text>
+          </Box>
+          <Text>{theme.dim(item.text)}</Text>
+        </Box>
+      );
+    case "assistant":
+      return (
+        <Box marginBottom={1}>
+          <AssistantText text={item.text} first={item.first} />
+        </Box>
+      );
+    case "success":
+      return (
+        <Box marginBottom={1}>
+          <Text>{theme.ok("✓ ") + item.text}</Text>
+        </Box>
+      );
+    case "error":
+      return (
+        <Box marginBottom={1}>
+          <Text>{theme.err("✗ ") + item.text}</Text>
+        </Box>
+      );
+    case "info":
+      return (
+        <Box marginBottom={1}>
+          <Text>{theme.dim("  " + item.text)}</Text>
+        </Box>
+      );
+    case "plain":
+      return (
+        <Box marginBottom={1} paddingLeft={2}>
+          <Text>{item.text}</Text>
+        </Box>
+      );
+  }
+}
+
+function helpText(): string {
+  const cmdW = Math.max(...COMMANDS.map((c) => `/${c.name}${c.args ? " " + c.args : ""}`.length)) + 3;
+  const cmds = COMMANDS.map((c) => `${theme.brand(`/${c.name}${c.args ? " " + c.args : ""}`.padEnd(cmdW))}${c.description}`);
+  const keys: [string, string][] = [
+    ["Enter", "Send message"],
+    ["Shift+Enter or \\ then Enter", "New line (Alt+Enter / Ctrl+J also work)"],
+    ["↑ / ↓", "Previous / next input"],
+    ["Ctrl+C", "Stop the response · clear input · press twice to exit"],
+    ["Ctrl+D", "Exit"],
+    ["Esc", "Close menus"],
+  ];
+  const keyW = Math.max(...keys.map(([k]) => k.length)) + 3;
+  return [
+    theme.bold("Commands"),
+    ...cmds,
+    "",
+    theme.bold("Keys"),
+    ...keys.map(([k, d]) => theme.brand(k.padEnd(keyW)) + d),
+  ].join("\n");
+}
