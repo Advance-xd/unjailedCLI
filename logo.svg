@@ -1,7 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Unjailed AI">
   <title>Unjailed AI</title>
   <rect x="18" y="18" width="220" height="220" fill="none" stroke="#7DD3FC" stroke-width="20"/>
-  <rect x="64" y="92" width="48" height="18" fill="#7DD3FC"/>
-  <rect x="144" y="92" width="48" height="18" fill="#7DD3FC"/>
-  <path d="M64 170 H192 V146" fill="none" stroke="#7DD3FC" stroke-width="18" stroke-linejoin="miter"/>
+  <path d="M60 80 H108 M84 80 V106 M148 80 H196 M172 80 V106" fill="none" stroke="#7DD3FC" stroke-width="18"/>
+  <path d="M84 132 V180 H172 V132" fill="none" stroke="#7DD3FC" stroke-width="18" stroke-linejoin="miter"/>
 </svg>
