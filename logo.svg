@@ -2,5 +2,5 @@
   <title>Unjailed AI</title>
   <rect x="18" y="18" width="220" height="220" fill="none" stroke="#7DD3FC" stroke-width="20"/>
   <path d="M60 84 H108 M148 84 H196" fill="none" stroke="#7DD3FC" stroke-width="18"/>
-  <path d="M84 132 V180 H172 V132" fill="none" stroke="#7DD3FC" stroke-width="18" stroke-linejoin="miter"/>
+  <path d="M84 120 V164 H172 V120" fill="none" stroke="#7DD3FC" stroke-width="18" stroke-linejoin="miter"/>
 </svg>
