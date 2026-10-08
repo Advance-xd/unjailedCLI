@@ -8,6 +8,8 @@ export const COMMANDS: CommandSpec[] = [
   { name: "login", description: "Log in with your API key" },
   { name: "logout", description: "Remove the saved API key" },
   { name: "model", description: "Choose a model", args: "[id]" },
+  { name: "effort", description: "Set how hard the model thinks (auto, low, medium, high)", args: "[level]" },
+  { name: "skills", description: "Switch skills on or off, or create one", args: "[name|new <name>]" },
   { name: "api", description: "Show API endpoint, key and connection status" },
   { name: "resume", description: "Continue a previous chat from this folder", args: "[n|id]" },
   { name: "sessions", description: "Browse, resume or delete saved chats" },

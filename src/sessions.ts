@@ -13,6 +13,7 @@ export interface Session {
   created: number;
   updated: number;
   messages: ChatMessage[];
+  skills?: string[]; // skills that were switched on, restored by /resume
 }
 
 export type SessionMeta = Omit<Session, "messages"> & { count: number };
@@ -58,6 +59,7 @@ function parse(raw: string): Session | null {
       model: typeof s.model === "string" ? s.model : "",
       created: Number(s.created) || 0,
       updated: Number(s.updated) || 0,
+      skills: Array.isArray(s.skills) ? s.skills.filter((x: unknown): x is string => typeof x === "string") : [],
       messages: s.messages.filter(
         (m: unknown): m is ChatMessage =>
           !!m && typeof (m as ChatMessage).content === "string" && ["user", "assistant", "system"].includes((m as ChatMessage).role),

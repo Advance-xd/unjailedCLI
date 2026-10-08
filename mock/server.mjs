@@ -12,6 +12,7 @@
 //   "reason"     → streams reasoning_content before the answer
 //   "markdown"   → a long markdown sample with code blocks
 //   "longcode"   → an 80-line code block (tests the live-area height cap)
+//   "debug"      → reports the reasoning_effort and system prompt it received
 
 import http from "node:http";
 
@@ -110,7 +111,11 @@ const server = http.createServer(async (req, res) => {
     const userTurns = body.messages.filter((m) => m.role === "user").length;
     let answer;
     if (lower.includes("markdown")) answer = MARKDOWN;
-    else if (lower.includes("history")) answer = `You've sent **${userTurns}** messages in this conversation. The first was: "${body.messages.find((m) => m.role === "user")?.content}"`;
+    else if (lower.includes("debug")) {
+      const system = body.messages.find((m) => m.role === "system")?.content ?? "";
+      const skills = [...system.matchAll(/<skill name="([^"]+)">/g)].map((m) => m[1]);
+      answer = `effort: **${body.reasoning_effort ?? "(not sent)"}** · skills: **${skills.join(", ") || "(none)"}**`;
+    } else if (lower.includes("history")) answer = `You've sent **${userTurns}** messages in this conversation. The first was: "${body.messages.find((m) => m.role === "user")?.content}"`;
     else answer = `You said: "${last}". I'm the **mock** server running \`${body.model}\` — this is turn ${userTurns}.`;
     if (lower.includes("longcode")) answer = "Here's a long file:\n\n```js\n" + Array.from({ length: 80 }, (_, i) => `console.log("line ${i + 1}");`).join("\n") + "\n```\n\nDone.";
     if (lower.includes("slow")) answer = Array.from({ length: 60 }, (_, i) => `Slow token ${i + 1}.`).join(" ");

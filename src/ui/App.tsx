@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Static, Text, useApp, useInput, useStdout, type Key } from "ink";
 import { AbortedError, ApiError, listModels, streamChat, type ChatMessage } from "../api.js";
 import { COMMANDS, filterCommands, parseCommand } from "../commands.js";
-import { configPath, deleteKey, maskKey, readConfig, resolveBaseUrl, resolveKey, writeConfig, type KeySource } from "../config.js";
+import { configPath, deleteKey, EFFORTS, maskKey, readConfig, resolveBaseUrl, resolveKey, writeConfig, type Effort, type KeySource } from "../config.js";
+import { createSkill, loadSkills, projectSkillsDir, skillsSystemPrompt, userSkillsDir, type Skill } from "../skills.js";
 import { DEFAULT_MODEL } from "../constants.js";
 import { renderMarkdown } from "../markdown.js";
 import { theme } from "../theme.js";
@@ -42,7 +43,9 @@ type Mode =
   | { type: "chat" }
   | { type: "login" }
   | { type: "picker"; models: string[] | null; selected: number }
-  | { type: "sessions"; list: SessionMeta[]; selected: number; scope: "folder" | "all"; confirmDelete: boolean };
+  | { type: "sessions"; list: SessionMeta[]; selected: number; scope: "folder" | "all"; confirmDelete: boolean }
+  | { type: "effort"; selected: number }
+  | { type: "skills"; list: Skill[]; selected: number };
 
 interface Stream {
   text: string; // not yet flushed to the transcript
@@ -85,6 +88,9 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
   const [auth, setAuth] = useState(() => resolveKey());
   const [baseUrl] = useState(() => resolveBaseUrl());
   const [model, setModel] = useState(() => process.env.UNJAILED_MODEL || readConfig().model || DEFAULT_MODEL);
+  const [effort, setEffort] = useState<Effort>(() => readConfig().effort ?? "auto");
+  // Skills switched on for this chat (by name). Their files are re-read on every request.
+  const [activeSkills, setActiveSkills] = useState<string[]>([]);
 
   const [items, setItems] = useState<Item[]>(() => [
     { id: id(), kind: "header", model, loggedIn: !!auth.key, keySource: auth.source },
@@ -215,7 +221,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         baseUrl,
         auth.key,
         model,
-        messages.current,
+        withSkills(messages.current),
         {
           onToken: (t) => {
             full += t;
@@ -230,6 +236,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
           },
         },
         ctrl.signal,
+        { effort },
       );
     } catch (err) {
       if (err instanceof AbortedError) outcome = "stopped";
@@ -263,7 +270,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     try {
       const s = session.current ?? newSession(process.cwd(), model);
       const first = !session.current;
-      session.current = { ...s, model, title: s.title || titleFrom(messages.current), updated: Date.now(), messages: [...messages.current] };
+      session.current = { ...s, model, skills: activeSkills, title: s.title || titleFrom(messages.current), updated: Date.now(), messages: [...messages.current] };
       saveSession(session.current);
       if (first) pruneSessions();
     } catch {
@@ -285,6 +292,8 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
       return;
     }
     session.current = s;
+    const available = new Set(loadSkills().map((k) => k.name));
+    setActiveSkills((s.skills ?? []).filter((n) => available.has(n)));
     messages.current = [...s.messages];
     const nextModel = s.model || model;
     if (s.model) setModel(s.model);
@@ -338,6 +347,73 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ---------- skills & effort ----------
+
+  /** The messages to send: a system message with the active skills (read fresh from disk), then the chat. */
+  const withSkills = (msgs: ChatMessage[]): ChatMessage[] => {
+    if (activeSkills.length === 0) return msgs;
+    const on = loadSkills().filter((k) => activeSkills.includes(k.name));
+    const system = skillsSystemPrompt(on);
+    return system ? [{ role: "system", content: system }, ...msgs] : msgs;
+  };
+
+  const toggleSkill = (name: string) => {
+    const on = activeSkills.includes(name);
+    setActiveSkills((list) => (on ? list.filter((n) => n !== name) : [...list, name]));
+    if (on) info(`Skill ${name} off.`);
+    else success(`Skill ${name} on — it applies to your next message.`);
+  };
+
+  const skillsCommand = (arg: string) => {
+    const newMatch = arg.match(/^new\s+(\S+)(?:\s+(--project|-p))?$/i);
+    if (newMatch) {
+      try {
+        const file = createSkill(newMatch[1]!, newMatch[2] ? "project" : "user");
+        success(`Created ${file}`);
+        info("Edit it in any text editor, then switch it on with /skills.");
+      } catch (err) {
+        error(err instanceof Error ? err.message : "Couldn't create the skill.");
+      }
+      return;
+    }
+    const list = loadSkills();
+    if (arg) {
+      const skill = list.find((k) => k.name === arg.toLowerCase());
+      if (skill) toggleSkill(skill.name);
+      else error(`No skill named "${arg}". Type /skills to see them, or /skills new ${arg} to make it.`);
+      return;
+    }
+    if (list.length === 0) {
+      push({
+        kind: "plain",
+        text: [
+          "No skills yet. A skill is a markdown file of instructions the model follows while it's on.",
+          "",
+          `${theme.brand("/skills new <name>")}            create one in ${userSkillsDir()}`,
+          `${theme.brand("/skills new <name> --project")}  create one in ${projectSkillsDir()}`,
+        ].join("\n"),
+      });
+      return;
+    }
+    setMode({ type: "skills", list, selected: 0 });
+  };
+
+  const setAndSaveEffort = (next: Effort) => {
+    setEffort(next);
+    writeConfig({ effort: next });
+    success(next === "auto" ? "Effort set to auto — the model decides how long to think." : `Effort set to ${next}.`);
+  };
+
+  const effortCommand = (arg: string) => {
+    if (!arg) {
+      setMode({ type: "effort", selected: Math.max(0, EFFORTS.indexOf(effort)) });
+      return;
+    }
+    const level = arg.toLowerCase() as Effort;
+    if ((EFFORTS as readonly string[]).includes(level)) setAndSaveEffort(level);
+    else error(`Effort can be ${EFFORTS.join(", ")}.`);
+  };
+
   // ---------- commands ----------
 
   const runCommand = async (raw: string) => {
@@ -373,6 +449,10 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         return;
       case "logout":
         return logout();
+      case "effort":
+        return effortCommand(cmd.arg);
+      case "skills":
+        return skillsCommand(cmd.arg);
       case "api":
         return apiInfo();
       case "model":
@@ -611,6 +691,34 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     if (key.ctrl && input === "d" && !editor.value && !stream) quit();
   });
 
+  // Effort and skills picker keys.
+  useInput(
+    (input, key) => {
+      if (mode.type === "effort") {
+        const n = EFFORTS.length;
+        if (key.upArrow) setMode({ ...mode, selected: (mode.selected - 1 + n) % n });
+        else if (key.downArrow) setMode({ ...mode, selected: (mode.selected + 1) % n });
+        else if (key.escape) setMode({ type: "chat" });
+        else if (key.return || key.tab) {
+          setMode({ type: "chat" });
+          const next = EFFORTS[mode.selected]!;
+          if (next === effort) info(`Effort is already ${next}.`);
+          else setAndSaveEffort(next);
+        }
+      } else if (mode.type === "skills") {
+        const n = mode.list.length;
+        if (key.upArrow) setMode({ ...mode, selected: (mode.selected - 1 + n) % n });
+        else if (key.downArrow) setMode({ ...mode, selected: (mode.selected + 1) % n });
+        else if (key.escape || key.return) setMode({ type: "chat" });
+        else if (input === " " || key.tab) {
+          const skill = mode.list[mode.selected];
+          if (skill) toggleSkill(skill.name);
+        }
+      }
+    },
+    { isActive: mode.type === "effort" || mode.type === "skills" },
+  );
+
   // Session picker keys.
   useInput(
     (input, key) => {
@@ -730,7 +838,39 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         </Box>
       )}
 
-      {mode.type !== "picker" && mode.type !== "sessions" && (
+      {mode.type === "effort" && (
+        <Box flexDirection="column" marginBottom={1}>
+          <Text>
+            {theme.bold("Reasoning effort")}
+            {theme.dim("  ↑/↓ move · Enter select · Esc cancel")}
+          </Text>
+          <SelectList
+            items={EFFORTS.map((e) => ({ key: e, label: e, hint: EFFORT_HINTS[e], current: e === effort }))}
+            selected={mode.selected}
+          />
+        </Box>
+      )}
+
+      {mode.type === "skills" && (
+        <Box flexDirection="column" marginBottom={1}>
+          <Text>
+            {theme.bold("Skills")}
+            {theme.dim("  ↑/↓ move · Space toggle · Enter done · /skills new <name> to add one")}
+          </Text>
+          <SelectList
+            items={mode.list.map((k) => ({
+              key: k.name,
+              label: `${activeSkills.includes(k.name) ? theme.ok("●") : theme.dim("○")} ${k.name}`,
+              hint: `${k.description}${k.scope === "project" ? "  (this project)" : ""}`,
+              mark: "",
+            }))}
+            selected={mode.selected}
+            max={Math.max(3, Math.min(10, size.rows - 8))}
+          />
+        </Box>
+      )}
+
+      {mode.type !== "picker" && mode.type !== "sessions" && mode.type !== "effort" && mode.type !== "skills" && (
         <Box flexDirection="column">
           <Text>{theme.dim("─".repeat(Math.max(10, width - 1)))}</Text>
           <Prompt
@@ -767,13 +907,21 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         </Box>
       )}
 
-      <StatusLine width={width} model={model} loggedIn={!!auth.key} keyMasked={maskKey(auth.key)} flash={flash} streaming={!!stream} />
+      <StatusLine width={width} model={model} effort={effort} skills={activeSkills.length} loggedIn={!!auth.key} keyMasked={maskKey(auth.key)} flash={flash} streaming={!!stream} />
     </>
   );
 }
 
-function StatusLine({ width, model, loggedIn, keyMasked, flash, streaming }: { width: number; model: string; loggedIn: boolean; keyMasked: string; flash: string | null; streaming: boolean }) {
-  const left = `${theme.brand("◆")} ${model}  ${theme.dim("·")}  ${loggedIn ? theme.ok("● Logged in") + theme.dim(` ${keyMasked}`) : theme.warn("○ Not logged in") + theme.dim(" — type /login")}`;
+const EFFORT_HINTS: Record<Effort, string> = {
+  auto: "the model decides (default)",
+  low: "quick answers, least thinking",
+  medium: "balanced",
+  high: "thinks longest — slower, uses more tokens",
+};
+
+function StatusLine({ width, model, effort, skills, loggedIn, keyMasked, flash, streaming }: { width: number; model: string; effort: Effort; skills: number; loggedIn: boolean; keyMasked: string; flash: string | null; streaming: boolean }) {
+  const extras = `${effort !== "auto" ? theme.dim(` · effort ${effort}`) : ""}${skills ? theme.dim(` · ${skills} skill${skills === 1 ? "" : "s"}`) : ""}`;
+  const left = `${theme.brand("◆")} ${model}${extras}  ${theme.dim("·")}  ${loggedIn ? theme.ok("● Logged in") + theme.dim(` ${keyMasked}`) : theme.warn("○ Not logged in") + theme.dim(" — type /login")}`;
   const right = flash ? theme.warn(flash) : width < 72 ? "" : theme.dim(streaming ? "Esc to stop" : "/ for commands");
   return (
     <Box justifyContent="space-between" paddingX={1}>
@@ -870,6 +1018,7 @@ function helpText(): string {
     ["Enter", "Send message"],
     ["Shift+Enter or \\ then Enter", "New line (Alt+Enter / Ctrl+J also work)"],
     ["↑ / ↓", "Previous / next input"],
+    ["Space", "Toggle a skill in /skills"],
     ["Esc", "Stop the response · close menus"],
     ["Ctrl+C", "Stop the response · clear input · press twice to exit"],
     ["Ctrl+D", "Exit"],

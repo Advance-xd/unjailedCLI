@@ -7,6 +7,8 @@ export interface SelectItem {
   label: string;
   hint?: string;
   current?: boolean;
+  /** Replaces the default "✓ current" marker. */
+  mark?: string;
 }
 
 /** A windowed list; the parent owns the selected index and key handling. */
@@ -21,7 +23,7 @@ export function SelectList({ items, selected, max = 8 }: { items: SelectItem[]; 
         const active = start + idx === selected;
         const pointer = active ? theme.brand("› ") : "  ";
         const label = item.label.padEnd(labelWidth);
-        const mark = item.current ? theme.ok(" ✓ current") : "";
+        const mark = item.mark ?? (item.current ? theme.ok(" ✓ current") : "");
         return (
           <Text key={item.key} wrap="truncate-end">
             {pointer}

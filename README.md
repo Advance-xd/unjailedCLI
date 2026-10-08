@@ -48,6 +48,8 @@ Type `/` to open the command menu. Use ↑/↓ to move, Enter or Tab to select, 
 | `/logout` | Remove the saved API key. |
 | `/model` | Pick a model from the live list. The current model is marked. Your chat history is kept when you switch, and your choice is remembered. |
 | `/model <id>` | Switch straight to a model by its id. |
+| `/effort` | Set reasoning effort: `auto` (default; the model decides), `low`, `medium` or `high`. `/effort high` sets it directly. Remembered between runs. |
+| `/skills` | Switch skills on or off for this chat (Space toggles). `/skills <name>` toggles one; `/skills new <name>` creates one. |
 | `/api` | Show the base URL, masked key and current model, and run a live connection check. |
 | `/resume` | Pick up a previous chat from the current folder. `/resume 2` or `/resume <id>` jumps straight to one. |
 | `/sessions` | Browse saved chats from every folder: resume one, or press `d` to delete it. |
@@ -65,6 +67,25 @@ unjailed -r     # choose a saved chat to resume
 ```
 
 Inside the app, `/resume` lists this folder's chats and `/sessions` lists all of them. Sessions are stored as JSON in `~/.unjailed/sessions/` (permissions `600`); the newest 200 are kept. To turn saving off, set `UNJAILED_NO_HISTORY=1` or put `"saveSessions": false` in `config.json`.
+
+## Skills
+
+A skill is a markdown file of instructions the model follows while it's switched on: a coding style, a review checklist, a persona, house rules for a project.
+
+| Where | Applies to |
+|---|---|
+| `./.unjailed/skills/<name>/SKILL.md` or `./.unjailed/skills/<name>.md` | This project (wins if a name clashes) |
+| `~/.unjailed/skills/<name>/SKILL.md` or `~/.unjailed/skills/<name>.md` | Every folder |
+
+```markdown
+---
+name: reviewer
+description: Strict code review
+---
+Review code like a senior engineer. List bugs first, then style.
+```
+
+Switched-on skills are sent as a system message with each request and re-read from disk every time, so edits apply straight away. Saved chats remember which skills were on, and `/resume` switches them back on.
 
 ## Keys
 

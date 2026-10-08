@@ -142,12 +142,18 @@ export async function streamChat(
   messages: ChatMessage[],
   handlers: StreamHandlers,
   signal: AbortSignal,
+  options: { effort?: string } = {},
 ): Promise<void> {
   const { res, controller } = await request(baseUrl, "/chat/completions", {
     method: "POST",
     key,
     signal,
-    body: JSON.stringify({ model, messages, stream: true }),
+    body: JSON.stringify({
+      model,
+      messages,
+      stream: true,
+      ...(options.effort && options.effort !== "auto" ? { reasoning_effort: options.effort } : {}),
+    }),
   });
   if (!res.ok) throw await httpError(res);
   if (!res.body) throw new ApiError("The server returned an empty response.");

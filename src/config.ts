@@ -8,7 +8,12 @@ export interface StoredConfig {
   baseUrl?: string;
   model?: string;
   saveSessions?: boolean;
+  effort?: Effort;
 }
+
+/** Reasoning effort sent as `reasoning_effort`; "auto" sends nothing and lets the model decide. */
+export const EFFORTS = ["auto", "low", "medium", "high"] as const;
+export type Effort = (typeof EFFORTS)[number];
 
 export type KeySource = "env" | "config" | null;
 
@@ -43,6 +48,7 @@ export function readConfig(): StoredConfig {
   else if (typeof raw.base === "string") cfg.baseUrl = raw.base;
   if (typeof raw.model === "string") cfg.model = raw.model;
   if (typeof raw.saveSessions === "boolean") cfg.saveSessions = raw.saveSessions;
+  if (typeof raw.effort === "string" && (EFFORTS as readonly string[]).includes(raw.effort)) cfg.effort = raw.effort as Effort;
   if (!cfg.apiKey) {
     const legacy = readJson(legacyAuthPath());
     if (typeof legacy.key === "string") cfg.apiKey = legacy.key;
