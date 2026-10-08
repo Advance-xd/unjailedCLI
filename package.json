@@ -1,6 +1,6 @@
 {
   "name": "unjailed",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Unjailed AI in your terminal — streaming chat CLI for unjailedai.com",
   "type": "module",
   "bin": {
