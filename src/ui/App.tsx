@@ -266,14 +266,18 @@ export function App() {
     else info("You're not logged in.");
   };
 
-  const apiInfo = async () => {
-    const lines = [
+  const apiLines = (key: string | null, source: KeySource, currentModel: string) =>
+    [
       `${theme.dim("Base URL ")} ${baseUrl}${process.env.UNJAILED_BASE_URL ? theme.dim("  (UNJAILED_BASE_URL)") : ""}`,
-      `${theme.dim("API key  ")} ${auth.key ? maskKey(auth.key) + theme.dim(auth.source === "env" ? "  (UNJAILED_API_KEY)" : "  (saved)") : "none"}`,
-      `${theme.dim("Model    ")} ${model}`,
+      `${theme.dim("API key  ")} ${key ? maskKey(key) + theme.dim(source === "env" ? "  (UNJAILED_API_KEY)" : "  (saved)") : "none"}`,
+      `${theme.dim("Model    ")} ${currentModel}`,
       `${theme.dim("Config   ")} ${configPath()}`,
-    ];
-    push({ kind: "plain", text: lines.join("\n") });
+    ].join("\n");
+
+  const connectedLine = (ms: number, count: number) => `Connected · ${ms} ms · ${count} model${count === 1 ? "" : "s"} available`;
+
+  const apiInfo = async () => {
+    push({ kind: "plain", text: apiLines(auth.key, auth.source, model) });
     if (!auth.key) {
       error(`Connection not checked. ${NOT_LOGGED_IN}`);
       return;
@@ -287,7 +291,7 @@ export function App() {
       if (ctrl.signal.aborted) return;
       const ms = Date.now() - t0;
       const available = models.some((m) => m.id === model);
-      success(`Connected · ${ms} ms · ${models.length} model${models.length === 1 ? "" : "s"} available`);
+      success(connectedLine(ms, models.length));
       if (!available) error(`Current model "${model}" isn't in the list. Pick one with /model.`);
     } catch (err) {
       if (!ctrl.signal.aborted) error(`Connection failed: ${friendly(err)}`);
@@ -347,25 +351,27 @@ export function App() {
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     setBusy("Checking key");
+    const t0 = Date.now();
     try {
       const models = await listModels(baseUrl, key, ctrl.signal);
       if (ctrl.signal.aborted) return;
+      const ms = Date.now() - t0;
       writeConfig({ apiKey: key });
       setEditor(EMPTY);
       setMode({ type: "chat" });
-      if (process.env.UNJAILED_API_KEY?.trim() && process.env.UNJAILED_API_KEY.trim() !== key) {
-        success(`Logged in · key ${maskKey(key)} saved`);
-        info("Note: UNJAILED_API_KEY is set in your environment and takes priority over the saved key.");
-      } else {
-        setAuth({ key, source: "config" });
-        success(`Logged in · key ${maskKey(key)} saved`);
-      }
+      const envKey = process.env.UNJAILED_API_KEY?.trim();
+      if (!envKey) setAuth({ key, source: "config" });
+      success(`Logged in · key ${maskKey(key)} saved`);
+      let active = model;
       if (models.length && !models.some((m) => m.id === model)) {
-        const fallback = models.find((m) => m.id === DEFAULT_MODEL)?.id ?? models[0]!.id;
-        setModel(fallback);
-        writeConfig({ model: fallback });
-        info(`Using model ${fallback}. Change it with /model.`);
+        active = models.find((m) => m.id === DEFAULT_MODEL)?.id ?? models[0]!.id;
+        setModel(active);
+        writeConfig({ model: active });
       }
+      // Show the same summary as /api, using the check we just did.
+      push({ kind: "plain", text: apiLines(envKey || key, envKey ? "env" : "config", active) });
+      success(connectedLine(ms, models.length));
+      if (envKey && envKey !== key) info("Note: UNJAILED_API_KEY is set in your environment and takes priority over the saved key.");
     } catch (err) {
       if (ctrl.signal.aborted) return;
       setEditor(EMPTY);
