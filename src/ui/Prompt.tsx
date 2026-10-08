@@ -98,6 +98,7 @@ export function Prompt({ state, onChange, onSubmit, onSpecialKey, mask, placehol
       }
       if (key.escape || key.tab || key.pageUp || key.pageDown) return;
       if (!input) return;
+      if (/^\[\?\d*u$/.test(input)) return; // stray keyboard-protocol reply from the terminal
       // Pasted text arrives as one chunk; normalise its line endings and strip control chars.
       let text = input.replace(/\r\n?/g, "\n").replace(/\x1b\[20[01]~/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
       if (mask) text = text.replace(/\s+/g, "");

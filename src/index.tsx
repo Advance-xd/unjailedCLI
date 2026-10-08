@@ -38,6 +38,11 @@ if (!process.stdin.isTTY) {
   process.exit(1);
 }
 
-const app = render(<App />, { exitOnCtrlC: false, kittyKeyboard: { mode: "auto" } });
+// Turn on the kitty keyboard protocol (Shift+Enter support) only where we know it exists.
+// Ink's "auto" mode queries the terminal before raw mode is on, and the reply leaks into the screen.
+const env = process.env;
+const kitty = "KITTY_WINDOW_ID" in env || env.TERM === "xterm-kitty" || env.TERM_PROGRAM === "WezTerm" || env.TERM_PROGRAM === "ghostty";
+
+const app = render(<App />, { exitOnCtrlC: false, kittyKeyboard: { mode: kitty ? "enabled" : "disabled" } });
 await app.waitUntilExit();
 process.exit(0);
