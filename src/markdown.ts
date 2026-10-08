@@ -1,6 +1,7 @@
 import { highlight, supportsLanguage } from "cli-highlight";
 import { c, colorLevel } from "./theme.js";
 import { BRAND_BLUE } from "./constants.js";
+import stringWidth from "string-width";
 
 /** Bold, italics, inline code and links within a single line. */
 function inline(text: string): string {
@@ -35,6 +36,32 @@ function codeBlock(code: string, lang: string): string[] {
   return [label, ...lines, c.gray("╰─")];
 }
 
+const splitRow = (line: string) =>
+  line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split(/(?<!\\)\|/)
+    .map((c) => c.trim().replace(/\\\|/g, "|"));
+
+const isTableSeparator = (line: string) => /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(line);
+
+function table(rows: string[][], aligns: ("left" | "right" | "center")[]): string[] {
+  const cols = Math.max(...rows.map((r) => r.length));
+  const cells = rows.map((r) => Array.from({ length: cols }, (_, i) => inline(r[i] ?? "")));
+  const widths = Array.from({ length: cols }, (_, i) => Math.max(3, ...cells.map((r) => stringWidth(r[i]!))));
+  const pad = (text: string, i: number) => {
+    const gap = widths[i]! - stringWidth(text);
+    if (aligns[i] === "right") return " ".repeat(gap) + text;
+    if (aligns[i] === "center") return " ".repeat(Math.floor(gap / 2)) + text + " ".repeat(Math.ceil(gap / 2));
+    return text + " ".repeat(gap);
+  };
+  const bar = c.gray(" │ ");
+  const out = cells.map((r, ri) => r.map((cell, i) => pad(ri === 0 ? c.bold(cell) : cell, i)).join(bar));
+  out.splice(1, 0, c.gray(widths.map((w) => "─".repeat(w)).join("─┼─")));
+  return out;
+}
+
 /**
  * Render markdown to ANSI text. Safe to call on partial (still-streaming) input:
  * an unterminated code fence renders as a code block so far.
@@ -53,6 +80,17 @@ export function renderMarkdown(src: string): string {
       i++;
       while (i < lines.length && !lines[i]!.trim().startsWith(marker)) body.push(lines[i++]!);
       out.push(...codeBlock(body.join("\n"), lang));
+      continue;
+    }
+
+    // GitHub-style table: a header row followed by a |---|---| separator.
+    if (line.trim().startsWith("|") && i + 1 < lines.length && isTableSeparator(lines[i + 1]!)) {
+      const aligns = splitRow(lines[i + 1]!).map((c) => (c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : "left") as "left" | "right" | "center");
+      const rows = [splitRow(line)];
+      i += 2;
+      while (i < lines.length && lines[i]!.trim().startsWith("|")) rows.push(splitRow(lines[i++]!));
+      i--;
+      out.push(...table(rows, aligns));
       continue;
     }
 

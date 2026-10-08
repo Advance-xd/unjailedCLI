@@ -71,6 +71,15 @@ test("markdown renders lists, code and partial fences without throwing", () => {
   assert.match(out, /const a = 1;/);
 });
 
+test("markdown renders GitHub tables with aligned columns", () => {
+  const out = renderMarkdown("| Model | Price |\n|:--|--:|\n| glm | $0.75 |\n| kimi-k3 | $1 |");
+  const lines = out.split("\n");
+  assert.equal(lines.length, 4);
+  assert.match(lines[0], /^Model\s+│ Price$/);
+  assert.match(lines[1], /^─+┼─+$/);
+  assert.match(lines[3], /^kimi-k3 │\s+\$1$/);
+});
+
 test("GET /models validates keys", async () => {
   const models = await listModels(BASE, KEY);
   assert.ok(models.some((m) => m.id === "kimi-k3"));

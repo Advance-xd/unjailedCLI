@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useRef } from "react";
 import { Box, Text, useInput, type Key } from "ink";
 import { theme } from "../theme.js";
 
@@ -54,9 +54,33 @@ function insert(s: EditorState, text: string): EditorState {
   return { value: s.value.slice(0, s.cursor) + text + s.value.slice(s.cursor), cursor: s.cursor + text.length };
 }
 
-export function Prompt({ state, onChange, onSubmit, onSpecialKey, mask, placeholder, isActive, label }: PromptProps) {
+export function Prompt({ state: propState, onChange: propOnChange, onSubmit, onSpecialKey, mask, placeholder, isActive, label }: PromptProps) {
+  // Several key events can arrive in one batch (e.g. a paste followed by an arrow key) before
+  // React re-renders, so edits build on the latest state kept here, not the possibly stale prop.
+  const latest = useRef(propState);
+  latest.current = propState;
+  const onChange = (s: EditorState) => {
+    latest.current = s;
+    propOnChange(s);
+  };
+  // Inside a bracketed paste (ESC[200~ … ESC[201~), Enter is a newline, never "send".
+  const pasting = useRef(false);
+
   useInput(
     (input, key) => {
+      const state = latest.current;
+      if (input.includes("[200~")) pasting.current = true;
+      if (pasting.current) {
+        const end = input.includes("[201~");
+        const text = input
+          .replace(/\x1b?\[20[01]~/g, "")
+          .replace(/\r\n?/g, "\n")
+          .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
+        const chunk = key.return ? "\n" : key.tab ? "  " : text;
+        if (end) pasting.current = false;
+        if (chunk) onChange(insert(state, mask ? chunk.replace(/\s+/g, "") : chunk));
+        return;
+      }
       if (onSpecialKey?.(key, input, state)) return;
       const { value, cursor } = state;
 
@@ -100,13 +124,14 @@ export function Prompt({ state, onChange, onSubmit, onSpecialKey, mask, placehol
       if (!input) return;
       if (/^\[\?\d*u$/.test(input)) return; // stray keyboard-protocol reply from the terminal
       // Pasted text arrives as one chunk; normalise its line endings and strip control chars.
-      let text = input.replace(/\r\n?/g, "\n").replace(/\x1b\[20[01]~/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
+      let text = input.replace(/\r\n?/g, "\n").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
       if (mask) text = text.replace(/\s+/g, "");
       if (text) onChange(insert(state, text));
     },
     { isActive },
   );
 
+  const state = propState;
   const shown = mask ? "•".repeat(state.value.length) : state.value;
   const prefix = label ?? "› ";
   const pad = " ".repeat(prefix.length);

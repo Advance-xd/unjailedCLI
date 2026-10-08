@@ -43,6 +43,13 @@ if (!process.stdin.isTTY) {
 const env = process.env;
 const kitty = "KITTY_WINDOW_ID" in env || env.TERM === "xterm-kitty" || env.TERM_PROGRAM === "WezTerm" || env.TERM_PROGRAM === "ghostty";
 
+// Bracketed paste: the terminal wraps pasted text in markers so newlines in it don't send the message.
+const BRACKETED_PASTE_ON = "\x1b[?2004h";
+const BRACKETED_PASTE_OFF = "\x1b[?2004l";
+process.stdout.write(BRACKETED_PASTE_ON);
+process.on("exit", () => process.stdout.write(BRACKETED_PASTE_OFF));
+for (const sig of ["SIGTERM", "SIGHUP"] as const) process.on(sig, () => process.exit(0));
+
 const app = render(<App />, { exitOnCtrlC: false, kittyKeyboard: { mode: kitty ? "enabled" : "disabled" } });
 await app.waitUntilExit();
 process.exit(0);

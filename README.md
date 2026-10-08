@@ -60,6 +60,8 @@ Type `/` to open the command menu. Use ↑/↓ to move, Enter or Tab to select, 
 | Enter | Send |
 | Shift+Enter, or `\` then Enter | New line. Alt+Enter and Ctrl+J also work, for terminals that don't report Shift+Enter. |
 | ↑ / ↓ | Step through your previous inputs |
+| Paste | Multi-line pastes stay in the input box; they're never sent until you press Enter |
+| Esc | Stop the response; close menus |
 | Ctrl+C | Stops the response while one is streaming. Otherwise clears the input; press it twice to exit. |
 | Ctrl+D | Exit |
 
@@ -97,7 +99,7 @@ UNJAILED_BASE_URL=http://localhost:8787/v1 UNJAILED_HOME=./.dev node dist/index.
 npm test          # unit + integration tests against the mock
 ```
 
-Put `ratelimit`, `servererror`, `credit`, `slow`, `hang`, `reason` or `markdown` in a chat message to make the mock server return that behavior.
+Put `ratelimit`, `servererror`, `credit`, `slow`, `hang`, `reason`, `markdown` or `longcode` in a chat message to make the mock server return that behavior.
 
 The default API URL is set in `src/constants.ts` (`DEFAULT_BASE_URL`).
 

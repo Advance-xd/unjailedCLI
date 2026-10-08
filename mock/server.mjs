@@ -11,6 +11,7 @@
 //   "slow"       → slow stream (lets you test Ctrl+C)     "hang" → never responds
 //   "reason"     → streams reasoning_content before the answer
 //   "markdown"   → a long markdown sample with code blocks
+//   "longcode"   → an 80-line code block (tests the live-area height cap)
 
 import http from "node:http";
 
@@ -111,6 +112,7 @@ const server = http.createServer(async (req, res) => {
     if (lower.includes("markdown")) answer = MARKDOWN;
     else if (lower.includes("history")) answer = `You've sent **${userTurns}** messages in this conversation. The first was: "${body.messages.find((m) => m.role === "user")?.content}"`;
     else answer = `You said: "${last}". I'm the **mock** server running \`${body.model}\` — this is turn ${userTurns}.`;
+    if (lower.includes("longcode")) answer = "Here's a long file:\n\n```js\n" + Array.from({ length: 80 }, (_, i) => `console.log("line ${i + 1}");`).join("\n") + "\n```\n\nDone.";
     if (lower.includes("slow")) answer = Array.from({ length: 60 }, (_, i) => `Slow token ${i + 1}.`).join(" ");
 
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
@@ -127,7 +129,7 @@ const server = http.createServer(async (req, res) => {
         await sleep(60);
       }
     }
-    const delay = lower.includes("slow") ? 250 : 15;
+    const delay = lower.includes("slow") ? 250 : lower.includes("longcode") ? 8 : 15;
     for (const t of tokens(answer)) {
       if (closed) return log("client closed (stopped)");
       send({ content: t });

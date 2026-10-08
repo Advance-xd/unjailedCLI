@@ -1,10 +1,10 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { logoLines } from "../logo.js";
+import { logoLines, LOGO_WIDTH } from "../logo.js";
 import { VERSION } from "../constants.js";
 import { theme } from "../theme.js";
 
-export function Header({ model, loggedIn, keySource }: { model: string; loggedIn: boolean; keySource: string | null }) {
+export function Header({ model, loggedIn, keySource, width }: { model: string; loggedIn: boolean; keySource: string | null; width: number }) {
   const logo = logoLines();
   const info = [
     "",
@@ -24,7 +24,7 @@ export function Header({ model, loggedIn, keySource }: { model: string; loggedIn
           <Text key={i}>{l}</Text>
         ))}
       </Box>
-      <Box flexDirection="column">
+      <Box flexDirection="column" width={Math.max(10, width - LOGO_WIDTH - 5)}>
         {info.map((l, i) => (
           <Text key={i} wrap="truncate-end">
             {l || " "}

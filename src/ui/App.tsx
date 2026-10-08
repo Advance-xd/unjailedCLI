@@ -10,6 +10,8 @@ import { Header } from "./Header.js";
 import { onFirstLine, onLastLine, Prompt, type EditorState } from "./Prompt.js";
 import { SelectList } from "./SelectList.js";
 import { Spinner } from "./Spinner.js";
+import { useTerminalSize } from "./useTerminalSize.js";
+import stringWidth from "string-width";
 
 type Item =
   | { id: number; kind: "header"; model: string; loggedIn: boolean; keySource: KeySource }
@@ -61,6 +63,7 @@ function safeFlushPoint(text: string): number {
 export function App() {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const size = useTerminalSize();
 
   const [auth, setAuth] = useState(() => resolveKey());
   const [baseUrl] = useState(() => resolveBaseUrl());
@@ -100,6 +103,23 @@ export function App() {
       exitArmed.current = false;
     }, ms);
   };
+
+  // After a resize, wipe the screen and reprint the transcript at the new width. Ink alone
+  // can't erase lines that the terminal re-wrapped, which leaves broken frames behind.
+  const firstSize = useRef(true);
+  useEffect(() => {
+    if (firstSize.current) {
+      firstSize.current = false;
+      return;
+    }
+    const t = setTimeout(() => {
+      stdout.write("\x1b[2J\x1b[3J\x1b[H");
+      setItems((prev) => (prev[0]?.kind === "header" ? [{ ...prev[0], id: id(), model, loggedIn: !!auth.key, keySource: auth.source }, ...prev.slice(1)] : prev));
+      setStaticKey((k) => k + 1);
+    }, 120);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [size.columns, size.rows]);
 
   // On startup, quietly make sure the saved model still exists.
   useEffect(() => {
@@ -395,6 +415,10 @@ export function App() {
   const submitChat = (value: string) => {
     const text = value.replace(/\s+$/, "");
     if (!text.trim()) return;
+    if (stream || busy) {
+      showFlash("Still working — Esc or Ctrl+C to stop it first");
+      return;
+    }
     setHistory((h) => (h[h.length - 1] === text ? h : [...h, text]));
     setHistIdx(null);
     setEditor(EMPTY);
@@ -449,6 +473,10 @@ export function App() {
 
   // Global keys: Ctrl+C stops / cancels / exits, Ctrl+D exits.
   useInput((input, key) => {
+    if (key.escape && abortRef.current && (stream || busy)) {
+      abortRef.current.abort();
+      return;
+    }
     if (key.ctrl && input === "c") {
       if (abortRef.current) {
         abortRef.current.abort();
@@ -499,13 +527,14 @@ export function App() {
 
   // ---------- render ----------
 
-  const width = stdout.columns || 80;
-  const promptActive = (mode.type === "chat" && !stream) || (mode.type === "login" && !busy);
+  const width = size.columns;
+  // You can keep typing while a reply streams; Enter waits until it's done.
+  const promptActive = mode.type === "chat" || (mode.type === "login" && !busy);
 
   if (exiting) {
     return (
       <Static key={staticKey} items={items}>
-        {(item) => <TranscriptItem key={item.id} item={item} />}
+        {(item) => <TranscriptItem key={item.id} item={item} width={width} />}
       </Static>
     );
   }
@@ -513,13 +542,13 @@ export function App() {
   return (
     <>
       <Static key={staticKey} items={items}>
-        {(item) => <TranscriptItem key={item.id} item={item} />}
+        {(item) => <TranscriptItem key={item.id} item={item} width={width} />}
       </Static>
 
       {stream && (
         <Box flexDirection="column" marginBottom={1}>
           {stream.text.trim() ? (
-            <AssistantText text={stream.text} first={!stream.flushed} />
+            <AssistantText text={stream.text} first={!stream.flushed} maxLines={Math.max(4, size.rows - 10)} width={width} />
           ) : null}
           {!stream.started && <Spinner label={stream.reasoning ? "Reasoning" : "Thinking"} />}
           {stream.started && !stream.text.trim() && <Text>{theme.dim("  …")}</Text>}
@@ -580,14 +609,14 @@ export function App() {
         </Box>
       )}
 
-      <StatusLine model={model} loggedIn={!!auth.key} keyMasked={maskKey(auth.key)} flash={flash} streaming={!!stream} />
+      <StatusLine width={width} model={model} loggedIn={!!auth.key} keyMasked={maskKey(auth.key)} flash={flash} streaming={!!stream} />
     </>
   );
 }
 
-function StatusLine({ model, loggedIn, keyMasked, flash, streaming }: { model: string; loggedIn: boolean; keyMasked: string; flash: string | null; streaming: boolean }) {
+function StatusLine({ width, model, loggedIn, keyMasked, flash, streaming }: { width: number; model: string; loggedIn: boolean; keyMasked: string; flash: string | null; streaming: boolean }) {
   const left = `${theme.brand("◆")} ${model}  ${theme.dim("·")}  ${loggedIn ? theme.ok("● Logged in") + theme.dim(` ${keyMasked}`) : theme.warn("○ Not logged in") + theme.dim(" — type /login")}`;
-  const right = flash ? theme.warn(flash) : theme.dim(streaming ? "Ctrl+C to stop" : "/ for commands");
+  const right = flash ? theme.warn(flash) : width < 72 ? "" : theme.dim(streaming ? "Esc to stop" : "/ for commands");
   return (
     <Box justifyContent="space-between" paddingX={1}>
       <Text wrap="truncate-end">{left}</Text>
@@ -596,23 +625,44 @@ function StatusLine({ model, loggedIn, keyMasked, flash, streaming }: { model: s
   );
 }
 
-function AssistantText({ text, first }: { text: string; first: boolean }) {
+/** Keep only the last lines that fit in `maxLines` terminal rows (after wrapping). */
+function tailToFit(rendered: string, maxLines: number, width: number): { text: string; hidden: number } {
+  const lines = rendered.split("\n");
+  const usable = Math.max(10, width - 3);
+  let rows = 0;
+  let start = lines.length;
+  while (start > 0) {
+    const h = Math.max(1, Math.ceil(stringWidth(lines[start - 1]!) / usable));
+    if (rows + h > maxLines) break;
+    rows += h;
+    start--;
+  }
+  return { text: lines.slice(start).join("\n"), hidden: start };
+}
+
+function AssistantText({ text, first, maxLines, width }: { text: string; first: boolean; maxLines?: number; width?: number }) {
+  let body = renderMarkdown(text);
+  let hidden = 0;
+  // While streaming, the live area must stay shorter than the terminal or Ink redraws the whole
+  // screen on every token. Older lines show in full once the paragraph or reply finishes.
+  if (maxLines && width) ({ text: body, hidden } = tailToFit(body, maxLines, width));
   return (
     <Box flexDirection="row">
       <Box width={2} flexShrink={0}>
         <Text>{first ? theme.brand("●") : " "}</Text>
       </Box>
-      <Box flexGrow={1}>
-        <Text>{renderMarkdown(text)}</Text>
+      <Box flexGrow={1} flexDirection="column">
+        {hidden > 0 && <Text>{theme.dim(`⋯ ${hidden} more line${hidden === 1 ? "" : "s"} above (shown in full when done)`)}</Text>}
+        <Text>{body}</Text>
       </Box>
     </Box>
   );
 }
 
-function TranscriptItem({ item }: { item: Item }) {
+function TranscriptItem({ item, width }: { item: Item; width: number }) {
   switch (item.kind) {
     case "header":
-      return <Header model={item.model} loggedIn={item.loggedIn} keySource={item.keySource} />;
+      return <Header model={item.model} loggedIn={item.loggedIn} keySource={item.keySource} width={width} />;
     case "user":
       return (
         <Box flexDirection="row" marginBottom={1}>
@@ -662,9 +712,9 @@ function helpText(): string {
     ["Enter", "Send message"],
     ["Shift+Enter or \\ then Enter", "New line (Alt+Enter / Ctrl+J also work)"],
     ["↑ / ↓", "Previous / next input"],
+    ["Esc", "Stop the response · close menus"],
     ["Ctrl+C", "Stop the response · clear input · press twice to exit"],
     ["Ctrl+D", "Exit"],
-    ["Esc", "Close menus"],
   ];
   const keyW = Math.max(...keys.map(([k]) => k.length)) + 3;
   return [
