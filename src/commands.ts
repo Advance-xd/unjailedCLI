@@ -9,7 +9,9 @@ export const COMMANDS: CommandSpec[] = [
   { name: "logout", description: "Remove the saved API key" },
   { name: "model", description: "Choose a model", args: "[id]" },
   { name: "api", description: "Show API endpoint, key and connection status" },
-  { name: "clear", description: "Clear the conversation and screen" },
+  { name: "resume", description: "Continue a previous chat from this folder", args: "[n|id]" },
+  { name: "sessions", description: "Browse, resume or delete saved chats" },
+  { name: "clear", description: "Start a new chat and clear the screen" },
   { name: "help", description: "Show commands and keyboard shortcuts" },
   { name: "exit", description: "Quit Unjailed" },
 ];

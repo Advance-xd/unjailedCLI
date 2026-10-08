@@ -11,6 +11,22 @@ import { onFirstLine, onLastLine, Prompt, type EditorState } from "./Prompt.js";
 import { SelectList } from "./SelectList.js";
 import { Spinner } from "./Spinner.js";
 import { useTerminalSize } from "./useTerminalSize.js";
+import {
+  deleteSession,
+  findSession,
+  listSessions,
+  loadSession,
+  newSession,
+  prettyPath,
+  pruneSessions,
+  saveSession,
+  sessionsDir,
+  sessionsEnabled,
+  timeAgo,
+  titleFrom,
+  type Session,
+  type SessionMeta,
+} from "../sessions.js";
 import stringWidth from "string-width";
 
 type Item =
@@ -25,7 +41,8 @@ type NewItem = Item extends infer T ? (T extends Item ? Omit<T, "id"> : never) :
 type Mode =
   | { type: "chat" }
   | { type: "login" }
-  | { type: "picker"; models: string[] | null; selected: number };
+  | { type: "picker"; models: string[] | null; selected: number }
+  | { type: "sessions"; list: SessionMeta[]; selected: number; scope: "folder" | "all"; confirmDelete: boolean };
 
 interface Stream {
   text: string; // not yet flushed to the transcript
@@ -60,7 +77,7 @@ function safeFlushPoint(text: string): number {
   return point;
 }
 
-export function App() {
+export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const size = useTerminalSize();
@@ -84,6 +101,7 @@ export function App() {
   const [flash, setFlash] = useState<string | null>(null);
 
   const messages = useRef<ChatMessage[]>([]);
+  const session = useRef<Session | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const exitArmed = useRef(false);
   const flashTimer = useRef<NodeJS.Timeout | undefined>(undefined);
@@ -230,11 +248,95 @@ export function App() {
 
     if (full.trim()) messages.current.push({ role: "assistant", content: full });
     else if (outcome !== "done") messages.current.pop(); // nothing came back; don't leave a dangling turn
+    persist();
 
     if (outcome === "stopped") info("Stopped.");
     else if (outcome === "error") error(errMsg);
     else if (!full.trim()) info("(empty response)");
   };
+
+  // ---------- sessions ----------
+
+  /** Save the conversation so /resume can pick it up later. Never throws. */
+  const persist = () => {
+    if (!sessionsEnabled() || !messages.current.some((m) => m.role === "assistant")) return;
+    try {
+      const s = session.current ?? newSession(process.cwd(), model);
+      const first = !session.current;
+      session.current = { ...s, model, title: s.title || titleFrom(messages.current), updated: Date.now(), messages: [...messages.current] };
+      saveSession(session.current);
+      if (first) pruneSessions();
+    } catch {
+      if (!persistWarned.current) error(`Couldn't save this chat to ${sessionsDir()}. /resume won't find it.`);
+      persistWarned.current = true;
+    }
+  };
+  const persistWarned = useRef(false);
+
+  const replayItems = (msgs: ChatMessage[]): NewItem[] =>
+    msgs.flatMap((m): NewItem[] =>
+      m.role === "user" ? [{ kind: "user", text: m.content }] : m.role === "assistant" ? [{ kind: "assistant", text: m.content, first: true }] : [],
+    );
+
+  const resumeSession = (meta: SessionMeta) => {
+    const s = loadSession(meta.id);
+    if (!s || s.messages.length === 0) {
+      error("That session couldn't be read. It may have been deleted.");
+      return;
+    }
+    session.current = s;
+    messages.current = [...s.messages];
+    const nextModel = s.model || model;
+    if (s.model) setModel(s.model);
+    setMode({ type: "chat" });
+    stdout.write("\x1b[2J\x1b[3J\x1b[H");
+    const header: Item = { id: id(), kind: "header", model: nextModel, loggedIn: !!auth.key, keySource: auth.source };
+    const intro: Item = { id: id(), kind: "info", text: `Resumed "${s.title}" · ${s.messages.filter((m) => m.role === "user").length} messages · ${prettyPath(s.cwd)} · ${timeAgo(s.updated)}` };
+    setItems([header, ...replayItems(s.messages).map((it) => ({ ...it, id: id() }) as Item), intro]);
+    setStaticKey((k) => k + 1);
+  };
+
+  const sessionLists = () => {
+    const all = listSessions();
+    const cwd = process.cwd();
+    return { all, here: all.filter((s) => s.cwd === cwd) };
+  };
+
+  const openSessions = (scope: "folder" | "all", arg = "") => {
+    if (!sessionsEnabled()) {
+      info("Saving chats is turned off (UNJAILED_NO_HISTORY or \"saveSessions\": false), so there's nothing to resume.");
+      return;
+    }
+    const { all, here } = sessionLists();
+    let list = scope === "folder" ? here : all;
+    if (scope === "folder" && list.length === 0 && all.length > 0) {
+      info("No saved chats from this folder. Showing chats from every folder.");
+      scope = "all";
+      list = all;
+    }
+    if (list.length === 0) {
+      info("No saved chats yet. Chats are saved automatically after each reply.");
+      return;
+    }
+    if (arg) {
+      const match = findSession(arg, list);
+      if (match) resumeSession(match);
+      else error(`No saved chat matches "${arg}". Type /${scope === "folder" ? "resume" : "sessions"} to pick from the list.`);
+      return;
+    }
+    setMode({ type: "sessions", list, selected: 0, scope, confirmDelete: false });
+  };
+
+  // unjailed --continue / --resume
+  useEffect(() => {
+    if (startup === "resume") openSessions("folder");
+    if (startup === "continue") {
+      const latest = sessionLists().here[0];
+      if (latest) resumeSession(latest);
+      else info("No previous chat in this folder. Starting a new one.");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ---------- commands ----------
 
@@ -253,8 +355,13 @@ export function App() {
       case "help":
         push({ kind: "plain", text: helpText() });
         return;
+      case "resume":
+        return openSessions("folder", cmd.arg);
+      case "sessions":
+        return openSessions("all", cmd.arg);
       case "clear":
         messages.current = [];
+        session.current = null; // the old chat stays saved; this starts a new one
         stdout.write("\x1b[2J\x1b[3J\x1b[H");
         setItems([{ id: id(), kind: "header", model, loggedIn: !!auth.key, keySource: auth.source }]);
         setStaticKey((k) => k + 1);
@@ -504,6 +611,37 @@ export function App() {
     if (key.ctrl && input === "d" && !editor.value && !stream) quit();
   });
 
+  // Session picker keys.
+  useInput(
+    (input, key) => {
+      if (mode.type !== "sessions") return;
+      const n = mode.list.length;
+      const current = mode.list[mode.selected];
+      if (mode.confirmDelete) {
+        if (input === "y" && current) {
+          deleteSession(current.id);
+          if (session.current?.id === current.id) session.current = null;
+          const list = mode.list.filter((s) => s.id !== current.id);
+          if (list.length === 0) {
+            setMode({ type: "chat" });
+            success("Deleted. No saved chats left.");
+          } else setMode({ ...mode, list, selected: Math.min(mode.selected, list.length - 1), confirmDelete: false });
+        } else setMode({ ...mode, confirmDelete: false });
+        return;
+      }
+      if (key.upArrow) setMode({ ...mode, selected: (mode.selected - 1 + n) % n });
+      else if (key.downArrow) setMode({ ...mode, selected: (mode.selected + 1) % n });
+      else if (key.escape) setMode({ type: "chat" });
+      else if ((key.return || key.tab) && current) resumeSession(current);
+      else if ((input === "d" || key.delete) && current) setMode({ ...mode, confirmDelete: true });
+      else if (input === "a" && mode.scope === "folder") {
+        const all = listSessions();
+        setMode({ ...mode, list: all, selected: 0, scope: "all" });
+      }
+    },
+    { isActive: mode.type === "sessions" },
+  );
+
   // Model picker keys.
   useInput(
     (_input, key) => {
@@ -572,7 +710,27 @@ export function App() {
         </Box>
       )}
 
-      {mode.type !== "picker" && (
+      {mode.type === "sessions" && (
+        <Box flexDirection="column" marginBottom={1}>
+          <Text>
+            {theme.bold(mode.scope === "folder" ? `Resume a chat from ${prettyPath(process.cwd())}` : "Saved chats")}
+            {theme.dim(`  ↑/↓ move · Enter resume · d delete${mode.scope === "folder" ? " · a all folders" : ""} · Esc cancel`)}
+          </Text>
+          <SelectList
+            items={mode.list.map((s, i) => ({
+              key: s.id,
+              label: `${String(i + 1).padStart(2)}. ${s.title}`,
+              hint: `${timeAgo(s.updated)} · ${s.count} msg${s.count === 1 ? "" : "s"}${mode.scope === "all" ? " · " + prettyPath(s.cwd) : ""}`,
+              current: session.current?.id === s.id,
+            }))}
+            selected={mode.selected}
+            max={Math.max(3, Math.min(10, size.rows - 8))}
+          />
+          {mode.confirmDelete && <Text>{theme.warn(`Delete "${mode.list[mode.selected]?.title}"? Press y to confirm, any other key to cancel.`)}</Text>}
+        </Box>
+      )}
+
+      {mode.type !== "picker" && mode.type !== "sessions" && (
         <Box flexDirection="column">
           <Text>{theme.dim("─".repeat(Math.max(10, width - 1)))}</Text>
           <Prompt

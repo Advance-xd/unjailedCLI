@@ -16,9 +16,13 @@ if (args.includes("--help") || args.includes("-h")) {
   console.log(`Unjailed AI ${VERSION} — chat with Unjailed AI in your terminal
 
 Usage
-  unjailed            start a chat session (type /login first)
+  unjailed            start a new chat (type /login first)
+  unjailed -c         continue the most recent chat from this folder
+  unjailed -r         pick a saved chat to resume
 
 Options
+  -c, --continue      continue the latest chat in the current folder
+  -r, --resume        choose a saved chat to resume
   -v, --version       print the version
   -h, --help          show this help
 
@@ -27,6 +31,8 @@ Environment
   UNJAILED_BASE_URL   API base URL
   UNJAILED_MODEL      model to start with
   UNJAILED_HOME       config directory (default ~/.unjailed)
+  UNJAILED_TIMEOUT    request timeout in seconds (default 30)
+  UNJAILED_NO_HISTORY set to 1 to stop saving chats (disables /resume)
   NO_COLOR            disable colors
 
 Config: ${configPath()}`);
@@ -50,6 +56,14 @@ process.stdout.write(BRACKETED_PASTE_ON);
 process.on("exit", () => process.stdout.write(BRACKETED_PASTE_OFF));
 for (const sig of ["SIGTERM", "SIGHUP"] as const) process.on(sig, () => process.exit(0));
 
-const app = render(<App />, { exitOnCtrlC: false, kittyKeyboard: { mode: kitty ? "enabled" : "disabled" } });
+const known = new Set(["-c", "--continue", "-r", "--resume"]);
+const unknown = args.find((a) => !known.has(a));
+if (unknown) {
+  console.error(`Unknown option: ${unknown}. Run "unjailed --help" for usage.`);
+  process.exit(1);
+}
+const startup = args.some((a) => a === "-c" || a === "--continue") ? "continue" : args.some((a) => a === "-r" || a === "--resume") ? "resume" : undefined;
+
+const app = render(<App startup={startup} />, { exitOnCtrlC: false, kittyKeyboard: { mode: kitty ? "enabled" : "disabled" } });
 await app.waitUntilExit();
 process.exit(0);

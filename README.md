@@ -49,9 +49,22 @@ Type `/` to open the command menu. Use ↑/↓ to move, Enter or Tab to select, 
 | `/model` | Pick a model from the live list. The current model is marked. Your chat history is kept when you switch, and your choice is remembered. |
 | `/model <id>` | Switch straight to a model by its id. |
 | `/api` | Show the base URL, masked key and current model, and run a live connection check. |
-| `/clear` | Clear the conversation and the screen. |
+| `/resume` | Pick up a previous chat from the current folder. `/resume 2` or `/resume <id>` jumps straight to one. |
+| `/sessions` | Browse saved chats from every folder: resume one, or press `d` to delete it. |
+| `/clear` | Start a new chat and clear the screen. The previous chat stays saved. |
 | `/help` | List commands and keyboard shortcuts. |
 | `/exit` | Quit. Ctrl+C twice or Ctrl+D also works. |
+
+## Sessions
+
+Chats are saved automatically after each reply, tagged with the folder you started `unjailed` in, so each project keeps its own history.
+
+```sh
+unjailed -c     # continue the most recent chat in this folder
+unjailed -r     # choose a saved chat to resume
+```
+
+Inside the app, `/resume` lists this folder's chats and `/sessions` lists all of them. Sessions are stored as JSON in `~/.unjailed/sessions/` (permissions `600`); the newest 200 are kept. To turn saving off, set `UNJAILED_NO_HISTORY=1` or put `"saveSessions": false` in `config.json`.
 
 ## Keys
 
@@ -74,6 +87,7 @@ Type `/` to open the command menu. Use ↑/↓ to move, Enter or Tab to select, 
 | `UNJAILED_MODEL` | Model to start with |
 | `UNJAILED_HOME` | Config directory (default `~/.unjailed`) |
 | `UNJAILED_TIMEOUT` | Request timeout in seconds (default 30) |
+| `UNJAILED_NO_HISTORY` | Set to `1` to stop saving chats (disables `/resume`) |
 | `NO_COLOR` | Turn off colors |
 
 ## Config location
@@ -83,11 +97,11 @@ Type `/` to open the command menu. Use ↑/↓ to move, Enter or Tab to select, 
 | macOS / Linux | `~/.unjailed/config.json` (permissions `600`) |
 | Windows | `%USERPROFILE%\.unjailed\config.json` |
 
-The file holds `apiKey`, `model` and an optional `baseUrl`. Delete it to reset everything. The CLI never prints your full key; it shows the key masked, for example `sk-…a1b2`.
+The file holds `apiKey`, `model`, an optional `baseUrl` and an optional `saveSessions`. Saved chats live next to it in `sessions/`. Delete it to reset everything. The CLI never prints your full key; it shows the key masked, for example `sk-…a1b2`.
 
 ## Privacy
 
-The CLI sends no telemetry and no analytics, and makes no requests other than the API calls you trigger. Your conversation lives in memory only and disappears when you exit.
+The CLI sends no telemetry and no analytics, and makes no requests other than the API calls you trigger. Saved chats stay on your machine in `~/.unjailed/sessions/` and are never uploaded; delete them with `/sessions` → `d`, delete the folder, or turn saving off with `UNJAILED_NO_HISTORY=1`.
 
 ## Development
 

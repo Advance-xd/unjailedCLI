@@ -7,6 +7,7 @@ export interface StoredConfig {
   apiKey?: string;
   baseUrl?: string;
   model?: string;
+  saveSessions?: boolean;
 }
 
 export type KeySource = "env" | "config" | null;
@@ -41,6 +42,7 @@ export function readConfig(): StoredConfig {
   if (typeof raw.baseUrl === "string") cfg.baseUrl = raw.baseUrl;
   else if (typeof raw.base === "string") cfg.baseUrl = raw.base;
   if (typeof raw.model === "string") cfg.model = raw.model;
+  if (typeof raw.saveSessions === "boolean") cfg.saveSessions = raw.saveSessions;
   if (!cfg.apiKey) {
     const legacy = readJson(legacyAuthPath());
     if (typeof legacy.key === "string") cfg.apiKey = legacy.key;
