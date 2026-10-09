@@ -274,7 +274,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
           tools: defs,
           execute: (name, args) => executeTool(name, args, process.cwd(), async (command) => {
             if (yolo) return true;
-            push({ kind: "plain", text: `${theme.warn("Run this command?")}\n  ${command}` });
+            push({ kind: "plain", text: `${theme.warn("Run this command?")}\n  ${command}\n${theme.dim("  y = run · n or Esc = skip")}` });
             setConfirmingCommand(command);
             const answer = await askYesNo();
             if (!answer) info("Skipped by user.");
@@ -398,16 +398,25 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
   // ---------- skills & effort ----------
 
   /** Wait for a single y/N keystroke while a tool wants to run a command. */
+  /** Wait for a single y/N keystroke while a tool wants to run a command.
+   *  Arm-timestamped: input in the first 150ms after arming is ignored — the
+   *  Enter that submitted the message (and Windows terminal key-release
+   *  sequences) arrive exactly then and were auto-declining the prompt before
+   *  the user could answer (2026-10-09 windows bug: every command "Skipped by
+   *  user" instantly). */
   const askYesNo = (): Promise<boolean> => {
     return new Promise((resolve) => {
+      toolArmedAt.current = Date.now();
       toolAnswerRef.current = (yes) => {
         toolAnswerRef.current = null;
+        toolArmedAt.current = 0;
         setConfirmingCommand(null);
         resolve(yes);
       };
     });
   };
   const toolAnswerRef = useRef<((yes: boolean) => void) | null>(null);
+  const toolArmedAt = useRef(0);
   const [confirmingCommand, setConfirmingCommand] = useState<string | null>(null);
 
   const clipArgs = (s: string) => (s.length > 80 ? s.slice(0, 80) + "…" : s);
@@ -620,8 +629,10 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
   const planAnswerRef = useRef<((yes: boolean) => void) | null>(null);
   const askPlanApprove = (): Promise<boolean> => {
     return new Promise((resolve) => {
+      toolArmedAt.current = Date.now();
       planAnswerRef.current = (yes) => {
         planAnswerRef.current = null;
+        toolArmedAt.current = 0;
         resolve(yes);
       };
     });
@@ -858,19 +869,22 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
 
   // Global keys: Ctrl+C stops / cancels / exits, Ctrl+D exits.
   useInput((input, key) => {
-    // pending run_command approval: y runs, anything else declines
-    if (toolAnswerRef.current && input && !key.ctrl && !key.escape) {
-      toolAnswerRef.current(input.trim().toLowerCase() === "y");
-      return;
+    // pending run_command approval: ONLY explicit y/yes approves, ONLY
+    // n/no/esc declines — anything else (stray newlines, key-release junk,
+    // other keys) keeps waiting. Input in the first 150ms after arming is
+    // dropped entirely (submit-Enter echo on windows terminals).
+    if (toolAnswerRef.current) {
+      if (Date.now() - toolArmedAt.current < 150) return;
+      const k = (input ?? "").trim().toLowerCase();
+      if (key.escape || k === "n" || k === "no") { toolAnswerRef.current(false); return; }
+      if (k === "y" || k === "yes" || (key.return && !key.shift)) { toolAnswerRef.current(true); return; }
+      return; // any other key: still waiting
     }
-    if (key.escape && toolAnswerRef.current) {
-      toolAnswerRef.current(false);
-      return;
-    }
-    // plan approval: Enter = yes, Esc or n = no
+    // plan approval: Enter = yes, Esc or n = no (same 150ms arm-guard as tools)
     if (planAnswerRef.current) {
+      if (Date.now() - toolArmedAt.current < 150) return;
       if (key.return && !key.shift) { planAnswerRef.current(true); return; }
-      if (key.escape || input.trim().toLowerCase() === "n") { planAnswerRef.current(false); return; }
+      if (key.escape || (input ?? "").trim().toLowerCase() === "n") { planAnswerRef.current(false); return; }
     }
     if (key.escape && abortRef.current && (stream || busy)) {
       abortRef.current.abort();
