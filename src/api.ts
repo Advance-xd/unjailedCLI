@@ -309,6 +309,7 @@ export async function agentTurn(
   let lastText = "";
   for (let round = 0; round < maxRounds; round++) {
     if (signal.aborted) throw new AbortedError();
+    trimHistory(history);
     let roundText = "";
     const res = await streamChat(baseUrl, key, model, history as ChatMessage[], {
       ...handlers,
@@ -336,4 +337,27 @@ export async function agentTurn(
     }
   }
   return lastText;
+}
+
+
+/** Keep the request payload inside upstream limits:
+ *  - no single message over 28k chars (upstream rejects >32k strings)
+ *  - whole history under ~400k chars (~100k tokens) by dropping oldest turns
+ *    from the middle (system/user-first and the newest turns survive). */
+const MAX_MSG_CHARS = 28_000;
+const MAX_HISTORY_CHARS = 400_000;
+function trimHistory(history: AgentMessage[]): void {
+  for (const m of history) {
+    if (typeof m.content === "string" && m.content.length > MAX_MSG_CHARS) {
+      (m as { content: string }).content = m.content.slice(0, MAX_MSG_CHARS - 30) + "\n…(trimmed)";
+    }
+  }
+  let total = history.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 200), 0);
+  while (total > MAX_HISTORY_CHARS && history.length > 6) {
+    // drop the oldest non-first, non-last-two message (keep original user ask + recent context)
+    const idx = history.findIndex((m, i) => i > 0 && i < history.length - 2 && m.role === "tool");
+    const drop = idx >= 0 ? idx : 1;
+    total -= typeof history[drop]!.content === "string" ? (history[drop]!.content as string).length : 200;
+    history.splice(drop, 1);
+  }
 }

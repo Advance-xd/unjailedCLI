@@ -20,6 +20,7 @@ export type ToolsMode = "off" | "read" | "cmds" | "yolo";
 export const MAX_READ_BYTES = 200_000;      // 200 KB per file read
 export const MAX_WRITE_BYTES = 200_000;     // 200 KB per file write
 export const MAX_RUN_OUTPUT = 30_000;       // chars of stdout/stderr kept
+export const MAX_TOOL_OUTPUT = 28_000;      // HARD cap: upstream rejects strings > 32k — never send more
 export const RUN_TIMEOUT_MS = 600_000;      // 10 min — downloads, builds, server setup
 export const MAX_BG_LOG = 100_000;
 export const MAX_LIST = 500;
@@ -170,7 +171,9 @@ export interface ToolResult {
 }
 
 function clip(s: string, max = MAX_RUN_OUTPUT): string {
-  return s.length > max ? s.slice(0, max) + `\n…(truncated at ${max} chars)` : s;
+  // every tool result funnels through here — enforce the global cap too
+  const m = Math.min(max, MAX_TOOL_OUTPUT);
+  return s.length > m ? s.slice(0, m) + `\n…(truncated at ${m} chars)` : s;
 }
 
 /* ───────────── glob: tiny recursive matcher, no deps ───────────── */
