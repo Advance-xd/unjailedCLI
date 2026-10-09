@@ -96,13 +96,27 @@ Windows.
 
 | Mode | What the model can do |
 |---|---|
-| `/tools` | Read files (200 KB cap) and list directories |
-| `/tools cmds` | Also run shell commands — you confirm each one with `y` |
-| `/tools yolo` | Also run shell commands — no confirmation |
+| `/tools` | **Read-only:** read files, list directories, glob-find files, grep contents, open urls in your browser, fetch web pages |
+| `/tools cmds` | **+ write:** write files, edit files, run shell commands — you confirm each command with `y` |
+| `/tools yolo` | Same as `cmds`, commands run without confirmation |
 | `/tools off` | Plain chat (default) |
 
+The toolkit:
+
+| Tool | What it does |
+|---|---|
+| `read_file` | Read a file (200 KB cap) |
+| `list_dir` | List a directory |
+| `glob` | Find files by name pattern (`**/*.ts`) |
+| `grep` | Search file contents, regex, file:line results |
+| `open_url` | Open a url in your default browser |
+| `web_fetch` | Fetch a page/API and read it as text |
+| `write_file` | Create or overwrite a file (cmds/yolo) |
+| `edit_file` | Exact string replace in a file (cmds/yolo) |
+| `run_command` | Shell with a 2-minute timeout (cmds/yolo) |
+
 Commands run through `cmd /c` on Windows and `/bin/sh -c` elsewhere, with a
-10-second timeout and 20 KB output cap. The choice is saved in your config and
+2-minute timeout (long enough for installs and builds) and 30 KB output cap. The choice is saved in your config and
 shown in the status line.
 
 ## Keys

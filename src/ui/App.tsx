@@ -242,7 +242,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         await streamChat(baseUrl, auth.key, model, baseMessages, streamHandlers, ctrl.signal, { effort });
       } else {
         // agent loop: definitions + executor; run_command asks unless yolo
-        const defs = toolDefinitions(toolsMode === "cmds" || toolsMode === "yolo");
+        const defs = toolDefinitions(toolsMode);
         const history: AgentMessage[] = [...baseMessages];
         const finalText = await agentTurn(baseUrl, auth.key, model, history, {
           ...streamHandlers,
@@ -404,20 +404,20 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     if (next === "" || next === "on" || next === "read") {
       setToolsMode("read");
       writeConfig({ tools: "read" });
-      success("Agent tools on — the model can read files and list directories.");
-      info("Add /tools cmds to let it run commands (it asks first), /tools yolo to skip asking, /tools off to disable.");
+      success("Agent tools on — read files, search, open urls, fetch pages.");
+      info("Add /tools cmds to also write files and run commands (you confirm each), /tools yolo to skip asking, /tools off to disable.");
       return;
     }
     if (next === "cmds" || next === "commands") {
       setToolsMode("cmds");
       writeConfig({ tools: "cmds" });
-      success("Agent tools on — read files, list directories, and run commands (you confirm each one).");
+      success("Agent tools on — full toolkit: read/write/edit, search, run commands (you confirm each one).");
       return;
     }
     if (next === "yolo") {
       setToolsMode("yolo");
       writeConfig({ tools: "yolo" });
-      success("Agent tools on — commands run WITHOUT confirmation. You asked for it.");
+      success("Agent tools on — full toolkit, commands run WITHOUT confirmation. You asked for it.");
       return;
     }
     if (next === "off") {
