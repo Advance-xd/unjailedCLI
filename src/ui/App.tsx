@@ -13,7 +13,7 @@ import { theme } from "../theme.js";
 import { Header } from "./Header.js";
 import { onFirstLine, onLastLine, Prompt, type EditorState } from "./Prompt.js";
 import { SelectList } from "./SelectList.js";
-import { Spinner } from "./Spinner.js";
+import { Spinner, type WorkKind } from "./Spinner.js";
 import { useTerminalSize } from "./useTerminalSize.js";
 import {
   deleteSession,
@@ -283,9 +283,13 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         const finalText = await agentTurn(baseUrl, auth.key, model, history, {
           ...streamHandlers,
           onToolCall: (name, args) => {
+            let argsObj: Record<string, unknown> = {};
+            try { argsObj = JSON.parse(args || "{}"); } catch { /* raw */ }
+            liveTool.current = { name, detail: toolDetail(name, argsObj), t0: Date.now() };
             push({ kind: "info", text: `⚙ ${name} ${clipArgs(args)}` });
           },
           onToolResult: (name, ok, output) => {
+            liveTool.current = null;
             push({ kind: ok ? "info" : "error", text: ok ? `↳ ${clipResult(output)}` : `↳ failed: ${clipResult(output)}` });
           },
         }, ctrl.signal, {
@@ -448,9 +452,23 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
   };
   const toolAnswerRef = useRef<((yes: boolean) => void) | null>(null);
   const toolArmedAt = useRef(0);
+  /** what the agent is doing right now, for the live status line */
+  const liveTool = useRef<{ name: string; detail: string; t0: number } | null>(null);
   const [confirmingCommand, setConfirmingCommand] = useState<string | null>(null);
 
   const clipArgs = (s: string) => (s.length > 80 ? s.slice(0, 80) + "…" : s);
+
+  function toolWorkKind(name: string): WorkKind {
+    if (name === "write_file" || name === "edit_file") return "coding";
+    if (name === "run_command") return "command";
+    if (name === "read_file" || name === "list_dir" || name === "glob" || name === "grep") return "reading";
+    if (name === "web_fetch" || name === "open_url") return "browsing";
+    return "idle";
+  }
+  function toolDetail(name: string, args: Record<string, unknown>): string {
+    const a = String(args.path ?? args.command ?? args.url ?? args.pattern ?? "");
+    return a ? a.split("/").pop()!.slice(0, 40) : name;
+  }
   const clipResult = (s: string) => {
     const first = s.split("\n").slice(0, 4).join("\n");
     return first.length > 200 ? first.slice(0, 200) + "…" : first || "(no output)";
@@ -1056,8 +1074,11 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
           {stream.text.trim() ? (
             <AssistantText text={stream.text} first={!stream.flushed} maxLines={Math.max(4, size.rows - 10)} width={width} />
           ) : null}
-          {!stream.started && <Spinner label={stream.reasoning ? "Reasoning" : "Thinking"} />}
-          {stream.started && !stream.text.trim() && <Text>{theme.dim("  …")}</Text>}
+          {!stream.started && !liveTool.current && <Spinner kind={stream.reasoning ? "reasoning" : "idle"} />}
+          {liveTool.current && (
+            <Spinner kind={toolWorkKind(liveTool.current.name)} detail={liveTool.current.detail} />
+          )}
+          {stream.started && !stream.text.trim() && !liveTool.current && <Text>{theme.dim("  …")}</Text>}
         </Box>
       )}
 

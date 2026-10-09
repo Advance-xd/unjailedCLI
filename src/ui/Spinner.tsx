@@ -2,19 +2,64 @@ import React, { useEffect, useState } from "react";
 import { Text } from "ink";
 import { theme } from "../theme.js";
 
-const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/**
+ * The live status line while the model works. Instead of a single opaque
+ * "Thinking…", it tells the user WHAT is happening right now — a coding pass,
+ * a shell command, reading files — with elapsed time. States:
+ *
+ *   idle      → pulsing dots (waiting for first token)
+ *   reasoning → "Reasoning" with a brain pulse
+ *   coding    → writing/editing files (brackets animation)
+ *   command   → shell command running (prompt animation)
+ *   reading   → reading files / searching
+ *   browsing  → fetching a URL
+ *   streaming → tokens landing (bytes counter)
+ */
 
-export function Spinner({ label }: { label: string }) {
+export type WorkKind = "idle" | "reasoning" | "streaming" | "coding" | "command" | "reading" | "browsing";
+
+const DOT_FRAMES    = ["   ", ".  ", ".. ", "..."];
+const BRAIN_FRAMES  = ["◦◦◦", "•◦◦", "◦•◦", "◦◦•"];
+const CODE_FRAMES   = ["[ ]", "{ }", "[_]", "{~}"];
+const CMD_FRAMES    = [">", ">>", ">>>", ">>", ">"];
+const READ_FRAMES   = ["◂", "◄", "◀", "◄"];
+const WEB_FRAMES    = ["⇄", "↻", "⟳", "↻"];
+const STREAM_FRAMES = ["▁", "▃", "▅", "▆", "▅", "▃"];
+
+const META: Record<WorkKind, { frames: string[]; verb: string }> = {
+  idle:      { frames: DOT_FRAMES,    verb: "Thinking" },
+  reasoning: { frames: BRAIN_FRAMES,  verb: "Reasoning" },
+  streaming: { frames: STREAM_FRAMES, verb: "Writing" },
+  coding:    { frames: CODE_FRAMES,   verb: "Writing code" },
+  command:   { frames: CMD_FRAMES,    verb: "Running command" },
+  reading:   { frames: READ_FRAMES,   verb: "Reading files" },
+  browsing:  { frames: WEB_FRAMES,    verb: "Fetching page" },
+};
+
+export function Spinner({ label, kind = "idle", detail }: { label?: string; kind?: WorkKind; detail?: string }) {
   const [i, setI] = useState(0);
   const [start] = useState(() => Date.now());
+  const [tick, setTick] = useState(0);
   useEffect(() => {
-    const t = setInterval(() => setI((n) => (n + 1) % FRAMES.length), 80);
+    const t = setInterval(() => {
+      setI((n) => n + 1);
+      setTick((n) => n + 1);
+    }, 110);
     return () => clearInterval(t);
   }, []);
+  const meta = META[kind];
   const secs = Math.floor((Date.now() - start) / 1000);
+  const timeStr = secs >= 60 ? `${Math.floor(secs / 60)}m${String(secs % 60).padStart(2, "0")}` : `${secs}s`;
+  // blink the elapsed counter every ~half second so the line feels alive even between frames
+  const showTime = tick % 10 !== 9 || secs === 0;
+  const frame = meta.frames[i % meta.frames.length]!;
+  const verb = label ?? meta.verb;
+  const tail = showTime ? `${timeStr} · Ctrl+C to stop` : `${timeStr}  · Ctrl+C to stop`;
   return (
     <Text>
-      {theme.brand(FRAMES[i]!)} {theme.dim(`${label}… ${secs > 0 ? `${secs}s · ` : ""}Ctrl+C to stop`)}
+      {theme.brand(frame)} {theme.bold(verb)}
+      {detail ? theme.dim(` · ${detail.length > 48 ? detail.slice(0, 48) + "…" : detail}`) : ""}
+      {theme.dim(` · ${tail}`)}
     </Text>
   );
 }
