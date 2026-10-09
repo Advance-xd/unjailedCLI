@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { VERSION } from "./constants.js";
 
 /** npm executable — npm.cmd on Windows (batch file needs shell:true). */
 function npmCmd(): string {
@@ -6,14 +7,7 @@ function npmCmd(): string {
 }
 
 export function currentVersion(): string {
-  // injected at build by postbuild? simplest: read package.json next to dist
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const pkg = require("../package.json");
-    return pkg.version;
-  } catch {
-    return "unknown";
-  }
+  return VERSION;
 }
 
 /** `npm view unjailed version` — latest published. */
@@ -31,10 +25,15 @@ export function latestVersion(): Promise<string | null> {
   });
 }
 
-/** `npm install -g unjailed@latest`. Streams output via onLine. */
+/** `npm install -g unjailed@<floor>`. Windows-safe:
+ *  the running install's npm shims are locked while we execute, so we move
+ *  the current package dir aside first (npm then writes a fresh one instead
+ *  of half-updating in place — the "updated but old after restart" bug). */
 export function runSelfUpdate(onLine: (line: string) => void): Promise<boolean> {
   return new Promise((resolve) => {
-    const child = spawn(npmCmd(), ["install", "-g", "unjailed@0.9.8"], { shell: true });  // explicit floor; @latest tag can lag
+    const pre = preflightWindows();
+    const args = "install -g unjailed@0.9.9" + (pre ? " --force" : "");
+    const child = spawn(npmCmd() + " " + args, { shell: true });
     let ok = true;
     const t = setTimeout(() => { child.kill("SIGKILL"); ok = false; }, 300_000);
     child.stdout?.on("data", (d) => d.toString().split("\n").forEach(onLine));
@@ -42,4 +41,22 @@ export function runSelfUpdate(onLine: (line: string) => void): Promise<boolean> 
     child.on("error", () => { clearTimeout(t); resolve(false); });
     child.on("close", (code) => { clearTimeout(t); resolve(code === 0 && ok); });
   });
+}
+
+function preflightWindows(): boolean {
+  if (process.platform !== "win32") return false;
+  try {
+    // locate the global node_modules like npm does
+    const prefix = require("node:child_process").execSync("npm config get prefix", { shell: true, encoding: "utf8" }).trim();
+    const dir = require("node:path").join(prefix, "node_modules", "unjailed");
+    const fs = require("node:fs");
+    if (fs.existsSync(dir)) {
+      const stamp = Date.now();
+      fs.renameSync(dir, dir + "-old-" + stamp);
+      // old copies get cleaned by npm's next prune; the rename unblocks the install
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
