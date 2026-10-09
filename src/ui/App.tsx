@@ -55,6 +55,8 @@ interface Stream {
   started: boolean; // any content received
   reasoning: boolean;
   flushed: boolean; // earlier paragraphs already moved to the transcript
+  reasoningChars: number; // live thinking volume (models can think for minutes)
+  reasoningTail: string; // last ~90 chars of thinking, for a live peek
 }
 
 const NOT_LOGGED_IN = "Not logged in — type /login";
@@ -218,6 +220,8 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     abortRef.current = ctrl;
     let full = "";
     let pending = "";
+    let reasoningChars = 0;
+    let reasoningTail = "";
     let flushedAny = false;
     let reasoning = false;
     let timer: NodeJS.Timeout | undefined;
@@ -234,13 +238,13 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
           flushedAny = true;
         }
       }
-      setStream({ text: pending, started: full.length > 0, reasoning, flushed: flushedAny });
+      setStream({ text: pending, started: full.length > 0, reasoning, flushed: flushedAny, reasoningChars, reasoningTail });
     };
     const schedule = () => {
       if (!timer) timer = setTimeout(sync, 40);
     };
 
-    setStream({ text: "", started: false, reasoning: false, flushed: false });
+    setStream({ text: "", started: false, reasoning: false, flushed: false, reasoningChars: 0, reasoningTail: "" });
     let outcome: "done" | "stopped" | "error" = "done";
     let errMsg = "";
     const useTools = toolsMode !== "off";
@@ -254,11 +258,11 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
           pending += t;
           schedule();
         },
-        onReasoning: () => {
-          if (!reasoning) {
-            reasoning = true;
-            schedule();
-          }
+        onReasoning: (t: string) => {
+          if (!reasoning) { reasoning = true; schedule(); }
+          reasoningChars += t ? t.length : 0;
+          if (t) reasoningTail = (reasoningTail + t).slice(-90);
+          schedule();
         },
       };
 
@@ -1075,6 +1079,9 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
             <AssistantText text={stream.text} first={!stream.flushed} maxLines={Math.max(4, size.rows - 10)} width={width} />
           ) : null}
           {!stream.started && !liveTool.current && <Spinner kind={stream.reasoning ? "reasoning" : "idle"} />}
+          {stream.reasoning && !stream.started && !liveTool.current && (
+            <Text>{theme.dim(`  thinking… ${stream.reasoningChars.toLocaleString()} chars · ${stream.reasoningTail.slice(-70).replace(/\s+/g, " ").trim()}`)}</Text>
+          )}
           {liveTool.current && (
             <Spinner kind={toolWorkKind(liveTool.current.name)} detail={liveTool.current.detail} />
           )}
