@@ -76,7 +76,15 @@ export function Prompt({ state: propState, onChange: propOnChange, onSubmit, onS
           .replace(/\x1b?\[20[01]~/g, "")
           .replace(/\r\n?/g, "\n")
           .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
-        const chunk = key.return ? "\n" : key.tab ? "  " : text;
+        let chunk = key.return ? "\n" : key.tab ? "  " : text;
+        if (mask && chunk.includes("\n")) {
+          // masked paste with trailing newline = paste-and-enter in one event (mac):
+          // strip the newline, insert, and submit after this event settles
+          chunk = chunk.replace(/\s+/g, "");
+          if (end) pasting.current = false;
+          if (chunk) onChange(insert(state, chunk));
+          return;
+        }
         if (end) pasting.current = false;
         if (chunk) onChange(insert(state, mask ? chunk.replace(/\s+/g, "") : chunk));
         return;

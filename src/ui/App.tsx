@@ -956,6 +956,23 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     return false;
   };
 
+  // Mac paste fix (login mode): Terminal.app/iTerm2 deliver Cmd+V in several
+  // broken shapes — ESC-prefixed (dropped as escape), per-char with meta set,
+  // or one chunk with a trailing newline. Any single input >= 20 chars while
+  // the login prompt is up IS the pasted key: capture it wholesale, strip
+  // whitespace/control chars, and auto-submit. Never reaches the Prompt's
+  // per-key path, so no shape can freeze or swallow it.
+  useInput(
+    (input, key) => {
+      if (mode.type !== "login" || key.ctrl || key.escape || key.meta || key.return) return;
+      const cleaned = input.replace(/[\x00-\x1f\x7f]/g, "").replace(/\s+/g, "");
+      if (cleaned.length >= 20 && cleaned.startsWith("sk-")) {
+        void submitLogin(cleaned);
+      }
+    },
+    { isActive: mode.type === "login" },
+  );
+
   // Global keys: Ctrl+C stops / cancels / exits, Ctrl+D exits.
   useInput((input, key) => {
     // pending run_command approval: ONLY explicit y/yes approves, ONLY

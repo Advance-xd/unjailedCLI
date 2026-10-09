@@ -32,7 +32,7 @@ export function latestVersion(): Promise<string | null> {
 export function runSelfUpdate(onLine: (line: string) => void): Promise<boolean> {
   return new Promise((resolve) => {
     const pre = preflightWindows();
-    const args = "install -g unjailed@0.9.12" + (pre ? " --force" : "");
+    const args = "install -g unjailed@0.9.13" + (pre ? " --force" : "");
     const child = spawn(npmCmd() + " " + args, { shell: true });
     let ok = true;
     const t = setTimeout(() => { child.kill("SIGKILL"); ok = false; }, 300_000);
