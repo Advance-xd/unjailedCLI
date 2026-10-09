@@ -1,4 +1,4 @@
-import { REQUEST_TIMEOUT_MS, STREAM_IDLE_TIMEOUT_MS } from "./constants.js";
+import { REQUEST_TIMEOUT_MS, STREAM_IDLE_TIMEOUT_MS, VERSION } from "./constants.js";
 
 export type Role = "system" | "user" | "assistant";
 export interface ChatMessage {
@@ -96,6 +96,8 @@ async function request(baseUrl: string, path: string, init: RequestInit & { key:
         Authorization: `Bearer ${init.key}`,
         "Content-Type": "application/json",
         Accept: path.includes("chat") ? "text/event-stream" : "application/json",
+        "User-Agent": `unjailed-cli/${VERSION}`,
+        "X-Unjailed-Client": "cli",
         ...(init.headers as Record<string, string> | undefined),
       },
     });
