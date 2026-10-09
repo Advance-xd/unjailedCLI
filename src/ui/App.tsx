@@ -78,7 +78,16 @@ function safeFlushPoint(text: string): number {
     const line = lines[i]!;
     if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
     offset += line.length + 1;
-    if (!inFence && line.trim() === "" && i > 0) point = offset;
+    if (inFence) continue;
+    // blank line outside a fence = paragraph boundary (original rule)
+    if (line.trim() === "" && i > 0) { point = offset; continue; }
+    // completed table row = safe boundary too — tables stream row-by-row and
+    // have no blank lines inside them, so without this a mid-table reply sat
+    // unflushed in the live area until the whole response finished (and the
+    // live area is height-clipped → looked cut off)
+    if (line.trim().startsWith("|") && !/^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(line)) {
+      point = offset;
+    }
   }
   return point;
 }
@@ -1198,7 +1207,7 @@ function tailToFit(rendered: string, maxLines: number, width: number): { text: s
 }
 
 function AssistantText({ text, first, maxLines, width }: { text: string; first: boolean; maxLines?: number; width?: number }) {
-  let body = renderMarkdown(text);
+  let body = renderMarkdown(text, { width });
   let hidden = 0;
   // While streaming, the live area must stay shorter than the terminal or Ink redraws the whole
   // screen on every token. Older lines show in full once the paragraph or reply finishes.

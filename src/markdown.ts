@@ -66,8 +66,36 @@ function table(rows: string[][], aligns: ("left" | "right" | "center")[]): strin
  * Render markdown to ANSI text. Safe to call on partial (still-streaming) input:
  * an unterminated code fence renders as a code block so far.
  */
-export function renderMarkdown(src: string): string {
-  const lines = src.replace(/\r\n?/g, "\n").split("\n");
+/** Wrap a single rendered line to `cols` visible columns, ANSI-aware.
+ *  Long unbroken lines (urls, paths, minified code) otherwise clip hard at
+ *  the terminal edge on narrow windows consoles. */
+function wrapAnsiLine(line: string, cols: number): string[] {
+  if (cols < 20) return [line];
+  const parts: string[] = [];
+  let cur = "";
+  let width = 0;
+  // split into (ansi, visible char) tokens
+  const tokens = line.match(/\x1b\[[0-9;]*m|./gu) ?? [];
+  for (const tok of tokens) {
+    if (tok.startsWith("\x1b")) { cur += tok; continue; }
+    const w = stringWidth(tok);
+    if (width + w > cols - 1) {
+      parts.push(cur);
+      cur = "";
+      width = 0;
+      // preserve leading bullet indent continuation
+    }
+    cur += tok;
+    width += w;
+  }
+  parts.push(cur);
+  return parts;
+}
+
+export function renderMarkdown(src: string, opts: { width?: number } = {}): string {
+  const lines0 = src.replace(/\r\n?/g, "\n").split("\n");
+  // width-wrapping happens post-render (see below) — fences stay unwrapped
+  const lines = lines0;
   const out: string[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
@@ -129,5 +157,11 @@ export function renderMarkdown(src: string): string {
 
     out.push(inline(line));
   }
-  return out.join("\n");
+  const joined = out.join("\n");
+  const w = opts.width;
+  if (!w) return joined;
+  return joined
+    .split("\n")
+    .flatMap((l) => (l.includes("\x1b") || stringWidth(l) > w - 1 ? wrapAnsiLine(l, w) : [l]))
+    .join("\n");
 }
