@@ -146,6 +146,7 @@ export interface ToolCallAccum {
 
 export interface AgentStreamResult {
   toolCalls: Array<{ id: string; name: string; args: string }>;
+  finishReason?: string | null;
 }
 
 /**
@@ -207,6 +208,7 @@ export async function streamChat(
   let idleTimedOut = false;
   let idle: NodeJS.Timeout | undefined;
   const toolAccum = new Map<number, ToolCallAccum>();
+  let finishReason: string | null = null;
   const armIdle = () => {
     clearTimeout(idle);
     idle = setTimeout(() => {
@@ -229,7 +231,7 @@ export async function streamChat(
         if (!line.startsWith("data:")) continue;
         const data = line.slice(5).trim();
         if (!data) continue;
-        if (data === "[DONE]") return finishTools(toolAccum);
+        if (data === "[DONE]") return finishTools(toolAccum, finishReason);
         let evt: any;
         try {
           evt = JSON.parse(data);
@@ -240,7 +242,9 @@ export async function streamChat(
           const m = typeof evt.error === "string" ? evt.error : evt.error.message;
           throw new ApiError(m ? `The server reported an error: ${m}` : "The server reported an error mid-response.");
         }
-        const delta = evt?.choices?.[0]?.delta ?? {};
+        const choice0 = evt?.choices?.[0];
+        if (choice0?.finish_reason) finishReason = choice0.finish_reason;
+        const delta = choice0?.delta ?? {};
         const reasoning = delta.reasoning_content ?? delta.reasoning;
         if (typeof reasoning === "string" && reasoning) handlers.onReasoning?.(reasoning);
         if (typeof delta.content === "string" && delta.content) handlers.onToken(delta.content);
@@ -257,7 +261,7 @@ export async function streamChat(
         }
       }
     }
-    return finishTools(toolAccum);
+    return finishTools(toolAccum, finishReason);
   } catch (err) {
     if (signal.aborted) throw new AbortedError();
     if (idleTimedOut) throw new ApiError("The response stalled and timed out. Try again.");
@@ -273,13 +277,13 @@ export async function streamChat(
 }
 
 /** Turn accumulated fragments into complete tool calls; undefined if none. */
-function finishTools(accum: Map<number, ToolCallAccum>): AgentStreamResult | undefined {
+function finishTools(accum: Map<number, ToolCallAccum>, finishReason: string | null = null): AgentStreamResult | undefined {
   const calls: AgentStreamResult["toolCalls"] = [];
   for (const slot of [...accum.values()].sort((a, b) => a.index - b.index)) {
     if (!slot.name) continue;
     calls.push({ id: slot.id ?? `call_${slot.index}`, name: slot.name!, args: slot.args || "{}" });
   }
-  return calls.length ? { toolCalls: calls } : undefined;
+  return calls.length ? { toolCalls: calls, finishReason } : (finishReason === "length" ? { toolCalls: [], finishReason } : undefined);
 }
 
 /* ————— agent loop: run tool calls to completion against the API ————— */
@@ -314,6 +318,7 @@ export async function agentTurn(
   // agent silently stop mid-task ("automode stops working after 5 minutes").
   const maxRounds = options.maxRounds ?? 40;
   let exhausted = false;
+  let lengthResumes = 0;
   let lastText = "";
   for (let round = 0; round < maxRounds; round++) {
     exhausted = round === maxRounds - 1;
@@ -325,6 +330,19 @@ export async function agentTurn(
       onToken: (t) => { roundText += t; handlers.onToken(t); },
     }, signal, { effort: options.effort, tools: options.tools });
     lastText = roundText || lastText;
+
+    // length-finish with zero content = the model burned its entire token budget
+    // on hidden reasoning before writing a word (plan-execute pattern triggers this).
+    // Transparently resume with a "stop thinking, act now" nudge instead of
+    // returning an empty response. Max 2 resumes per turn.
+    if (res && res.finishReason === "length" && !roundText.trim() && res.toolCalls.length === 0) {
+      if (lengthResumes < 2) {
+        lengthResumes++;
+        handlers.onToken("\n*(resuming after long reasoning — continuing)*\n\n");
+        history.push({ role: "user", content: "Continue now. Skip any further deliberation: proceed directly with the task. If you were executing a plan, start step 1 immediately." });
+        continue;
+      }
+    }
 
     if (!res || res.toolCalls.length === 0) return lastText;
 
