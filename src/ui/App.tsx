@@ -49,6 +49,7 @@ type Mode =
   | { type: "sessions"; list: SessionMeta[]; selected: number; scope: "folder" | "all"; confirmDelete: boolean }
   | { type: "effort"; selected: number }
   | { type: "skills"; list: Skill[]; selected: number }
+  | { type: "plan-approve"; steps: string[]; selected: number }; // 0 = start, 1 = cancel
 
 interface Stream {
   text: string; // not yet flushed to the transcript
@@ -705,8 +706,10 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     const trimmed = plan.trim();
     if (!trimmed || !/^\s*1[.)]/m.test(trimmed)) return true; // didn't produce a plan; just run
     const steps = trimmed.split("\n").map((l) => l.trim()).filter((l) => /^\d+[.)]/.test(l)).slice(0, 8);
-    push({ kind: "plain", text: `${theme.bold("Plan")}${theme.dim("  · Enter approve · Esc or n reject")}\n${steps.map((s) => "  " + theme.brand(s)).join("\n")}` });
+    push({ kind: "plain", text: `${theme.bold("Draft plan")}\n${steps.map((s) => "  " + theme.brand(s)).join("\n")}` });
+    setMode({ type: "plan-approve", steps, selected: 0 });
     const approved = await askPlanApprove();
+    setMode({ type: "chat" });
     if (approved) success("Plan approved — executing.");
     else info("Plan rejected. Tell me what to change, or rephrase the task.");
     return approved;
@@ -966,11 +969,17 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
       if (k === "y" || k === "yes" || (key.return && !key.shift)) { toolAnswerRef.current(true); return; }
       return; // any other key: still waiting
     }
-    // plan approval: Enter = yes, Esc or n = no (same 150ms arm-guard as tools)
-    if (planAnswerRef.current) {
+    // plan approval: arrow-select Start/Cancel, Enter confirms, Esc = cancel
+    if (mode.type === "plan-approve" && planAnswerRef.current) {
       if (Date.now() - toolArmedAt.current < 150) return;
-      if (key.return && !key.shift) { planAnswerRef.current(true); return; }
-      if (key.escape || (input ?? "").trim().toLowerCase() === "n") { planAnswerRef.current(false); return; }
+      if (key.upArrow || key.downArrow || key.leftArrow || key.rightArrow || (input ?? "").trim().toLowerCase() === "y" || (input ?? "").trim().toLowerCase() === "n") {
+        setMode({ ...mode, selected: mode.selected === 0 ? 1 : 0 });
+        return;
+      }
+      if (key.return && !key.shift) { planAnswerRef.current(mode.selected === 0); return; }
+      if (key.tab) { setMode({ ...mode, selected: mode.selected === 0 ? 1 : 0 }); return; }
+      if (key.escape) { planAnswerRef.current(false); return; }
+      return;
     }
     if (key.escape && abortRef.current && (stream || busy)) {
       abortRef.current.abort();
@@ -1087,7 +1096,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
 
   const width = size.columns;
   // You can keep typing while a reply streams; Enter waits until it's done.
-  const promptActive = (mode.type === "chat" || (mode.type === "login" && !busy)) && confirmingCommand === null && planAnswerRef.current === null;
+  const promptActive = mode.type === "chat" && confirmingCommand === null && planAnswerRef.current === null;
 
   if (exiting) {
     return (
@@ -1165,6 +1174,23 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
           <SelectList
             items={EFFORTS.map((e) => ({ key: e, label: e, hint: EFFORT_HINTS[e], current: e === effort }))}
             selected={mode.selected}
+          />
+        </Box>
+      )}
+
+      {mode.type === "plan-approve" && (
+        <Box flexDirection="column" marginBottom={1}>
+          <Text>
+            {theme.bold("Start this plan?")}
+            {theme.dim("  ↑/↓ or y/n switch · Enter confirm · Esc cancel")}
+          </Text>
+          <SelectList
+            items={[
+              { key: "yes", label: `${mode.selected === 0 ? theme.ok("▶") : " "} ${theme.ok("Yes — start plan")}`, hint: `${mode.steps.length} steps`, mark: "" },
+              { key: "no", label: `${mode.selected === 1 ? theme.warn("▶") : " "} ${theme.warn("No — cancel")}`, hint: "tell me what to change", mark: "" },
+            ]}
+            selected={mode.selected}
+            max={2}
           />
         </Box>
       )}
