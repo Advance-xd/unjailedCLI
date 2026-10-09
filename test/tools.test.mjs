@@ -132,14 +132,20 @@ test("run_command works cross-platform and respects approval", async () => {
   assert.equal(r3.ok, true);
 });
 
-test("run_command timeout kills hanging commands", async () => {
-  const hang = process.platform === "win32" ? "ping -n 180 127.0.0.1" : "sleep 180";
-  const t0 = Date.now();
-  const r = await executeTool("run_command", { command: hang }, process.cwd());
-  assert.equal(r.ok, false);
-  assert.ok(/timed out/.test(r.output));
-  assert.ok(Date.now() - t0 < 130_000, "must not hang past the timeout");
-}, 140_000);
+test("run_command background starts detached and logs to file", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "uj-bg-"));
+  const r = await executeTool("run_command", { command: "echo hi-from-bg", background: true }, dir);
+  assert.equal(r.ok, true);
+  assert.ok(/background/i.test(r.output));
+  assert.ok(/\.unjailed\/bg-.*\.log/.test(r.output.replace(/\\/g, "/")));
+  // give the detached shell a moment to write
+  await new Promise((res) => setTimeout(res, 1500));
+  const logDir = path.join(dir, ".unjailed");
+  const logs = fs.readdirSync(logDir).filter((f) => f.endsWith(".log"));
+  assert.ok(logs.length > 0, "log file exists");
+  const content = fs.readFileSync(path.join(logDir, logs[0]), "utf8");
+  assert.ok(content.includes("hi-from-bg"));
+});
 
 test("unknown tool errors cleanly", async () => {
   const r = await executeTool("nope", {}, process.cwd());

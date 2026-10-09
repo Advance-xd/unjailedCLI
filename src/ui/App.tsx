@@ -307,7 +307,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
 
     if (outcome === "stopped") info("Stopped.");
     else if (outcome === "error") error(errMsg);
-    else if (!full.trim()) info("(empty response)");
+    else if (!full.trim()) info("(no response text — the model may have hit its output limit mid-reasoning; try /effort medium or rephrase)");
   };
 
   // ---------- sessions ----------

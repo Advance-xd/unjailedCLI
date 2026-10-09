@@ -20,7 +20,8 @@ export type ToolsMode = "off" | "read" | "cmds" | "yolo";
 export const MAX_READ_BYTES = 200_000;      // 200 KB per file read
 export const MAX_WRITE_BYTES = 200_000;     // 200 KB per file write
 export const MAX_RUN_OUTPUT = 30_000;       // chars of stdout/stderr kept
-export const RUN_TIMEOUT_MS = 120_000;      // 2 min — real builds need it
+export const RUN_TIMEOUT_MS = 600_000;      // 10 min — downloads, builds, server setup
+export const MAX_BG_LOG = 100_000;
 export const MAX_LIST = 500;
 export const MAX_GLOB_RESULTS = 200;
 export const MAX_GREP_RESULTS = 100;
@@ -147,10 +148,13 @@ export function toolDefinitions(mode: Exclude<ToolsMode, "off">): ToolDef[] {
         type: "function",
         function: {
           name: "run_command",
-          description: "Run a shell command in the project directory (bash on unix, cmd on Windows). 2-minute timeout. Use for builds, tests, git, installs.",
+          description: "Run a shell command in the project directory (bash on unix, cmd on Windows). Long timeout — fine for downloads, builds, installs, server setup. Use background:true for long-running processes (servers, daemons); returns immediately with the log path.",
           parameters: {
             type: "object",
-            properties: { command: { type: "string", description: "The command line to run" } },
+            properties: {
+              command: { type: "string", description: "The command line to run" },
+              background: { type: "boolean", description: "Run detached in the background (for servers/daemons). Returns immediately; output goes to a log file." },
+            },
             required: ["command"],
           },
         },
@@ -409,8 +413,28 @@ export async function executeTool(
 
     if (name === "run_command") {
       const command = String(args.command ?? "");
+      const background = args.background === true;
       if (!command) return { ok: false, output: "command is required" };
       if (approve && !(await approve(command))) return { ok: false, output: "The user declined to run this command." };
+      if (background) {
+        // detached long-runner (server/daemon): log to file, return immediately
+        const isWin = process.platform === "win32";
+        const logDir = path.join(cwd, ".unjailed");
+        fs.mkdirSync(logDir, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const logFile = path.join(logDir, `bg-${stamp}.log`);
+        try {
+          const out = fs.openSync(logFile, "a");
+          const child = spawn(isWin ? "cmd" : "/bin/sh", isWin ? ["/c", command] : ["-c", command], {
+            cwd, detached: true, stdio: ["ignore", out, out],
+          });
+          child.unref();
+          setTimeout(() => { try { fs.closeSync(out); } catch { /* closed */ } }, 500).unref();
+          return { ok: true, output: `Started in background (pid ${child.pid}). Output: ${path.relative(cwd, logFile)}\nCheck it later with: run_command { "command": "tail -n 50 ${path.relative(cwd, logFile).split(path.sep).join("/")}" }` };
+        } catch (e) {
+          return { ok: false, output: `Failed to start background command: ${(e as Error).message}` };
+        }
+      }
       return await new Promise<ToolResult>((resolve) => {
         const isWin = process.platform === "win32";
         const child = spawn(isWin ? "cmd" : "/bin/sh", isWin ? ["/c", command] : ["-c", command], { cwd });
@@ -419,7 +443,7 @@ export async function executeTool(
         const done = (r: ToolResult) => { if (!settled) { settled = true; resolve(r); } };
         const timer = setTimeout(() => {
           child.kill("SIGKILL");
-          done({ ok: false, output: clip(out) + `\n…timed out after ${RUN_TIMEOUT_MS / 1000}s (killed)` });
+          done({ ok: false, output: clip(out) + `\n…timed out after ${RUN_TIMEOUT_MS / 60000} min (killed). For servers/daemons pass background:true.` });
         }, RUN_TIMEOUT_MS);
         child.stdout.on("data", (d) => { out += d.toString(); });
         child.stderr.on("data", (d) => { out += d.toString(); });

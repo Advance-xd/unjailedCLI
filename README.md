@@ -119,7 +119,9 @@ The toolkit:
 | `run_command` | Shell with a 2-minute timeout (cmds/yolo) |
 
 Commands run through `cmd /c` on Windows and `/bin/sh -c` elsewhere, with a
-2-minute timeout (long enough for installs and builds) and 30 KB output cap. The choice is saved in your config and
+10-minute timeout (long enough for downloads, builds and server installs) and a
+30 KB output cap. Long-running processes — game servers, daemons — take
+`background: true` and run detached, logging to `.unjailed/bg-*.log`. The choice is saved in your config and
 shown in the status line.
 
 ## Keys
