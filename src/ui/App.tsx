@@ -168,7 +168,11 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         });
       })
       .catch((err) => {
-        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) error(`Your API key${auth.source === "env" ? " (from UNJAILED_API_KEY)" : ""} was rejected. Type /login to enter a new one.`);
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+      const src = auth.source === "env" ? "the UNJAILED_API_KEY environment variable" : "the saved key";
+      error(`Your API key from ${src} was rejected. Type /login to enter a new one.` +
+        (auth.source === "env" ? ` (To stop using the env var: remove UNJAILED_API_KEY from your environment${process.platform === "win32" ? " — e.g. [Environment]::SetEnvironmentVariable('UNJAILED_API_KEY', \$null, 'User') then open a new terminal" : ""}.)` : ""));
+    }
       });
     return () => ctrl.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -580,7 +584,10 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     if (hadSaved) deleteKey();
     if (process.env.UNJAILED_API_KEY?.trim()) {
       if (hadSaved) success("Saved key removed.");
-      info("You're still logged in through the UNJAILED_API_KEY environment variable. Unset it to log out completely.");
+      info("You're still logged in through the UNJAILED_API_KEY environment variable. Unset it to log out completely." +
+        (process.platform === "win32"
+          ? ' On Windows: [Environment]::SetEnvironmentVariable("UNJAILED_API_KEY", $null, "User") — then open a new terminal.'
+          : " On macOS/Linux: remove it from your shell profile (~/.bashrc, ~/.zshrc)."));
       return;
     }
     setAuth({ key: null, source: null });
