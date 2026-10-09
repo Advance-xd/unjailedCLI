@@ -266,8 +266,19 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         },
       };
 
+      // ── auto-effort: trivial asks don't pay for deep thinking ──
+      // short prompt + no mutation verbs + no question-of-depth → low effort.
+      const autoEffortFor = (t: string): Effort => {
+        if (effort !== "auto") return effort; // user pinned a level: respect it
+        const words = t.trim().split(/\s+/).length;
+        const deep = /\b(why|how|explain|design|architect|debug|refactor|plan|analyz|compare|optimi[sz]e|write|build|implement)\b/i.test(t);
+        const trivial = /^(hi|hey|hello|yo|thanks|thank you|ok|okay|test|yes|no)\b/i.test(t.trim());
+        if (trivial || (words <= 6 && !deep)) return "low";
+        return "auto";
+      };
+
       if (!useTools) {
-        await streamChat(baseUrl, auth.key, model, baseMessages, streamHandlers, ctrl.signal, { effort });
+        await streamChat(baseUrl, auth.key, model, baseMessages, streamHandlers, ctrl.signal, { effort: autoEffortFor(text) });
       } else {
         // agent loop: definitions + executor; run_command asks unless yolo/auto
         const defs = toolDefinitions(toolsMode);
@@ -284,6 +295,25 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
           }
         }
 
+        // ── context diet: shrink OLD tool results before each turn ──
+        // The loop resends the whole history every round; by round 8 that's
+        // tens of thousands of tokens of stale output that cost time AND money.
+        // Keep the newest result full; older ones compress to head+tail.
+        const dietHistory = (h: AgentMessage[]): AgentMessage[] => {
+          let toolSeenFromEnd = 0;
+          for (let i = h.length - 1; i >= 0; i--) {
+            const m = h[i]!;
+            if (m.role !== "tool") continue;
+            toolSeenFromEnd++;
+            if (toolSeenFromEnd <= 2) continue; // newest two stay full
+            if (m.content.length > 800) {
+              (m as { content: string }).content = m.content.slice(0, 400) + "\n…(trimmed)\n" + m.content.slice(-300);
+            }
+          }
+          return h;
+        };
+        dietHistory(history);
+
         const finalText = await agentTurn(baseUrl, auth.key, model, history, {
           ...streamHandlers,
           onToolCall: (name, args) => {
@@ -297,7 +327,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
             push({ kind: ok ? "info" : "error", text: ok ? `↳ ${clipResult(output)}` : `↳ failed: ${clipResult(output)}` });
           },
         }, ctrl.signal, {
-          effort,
+          effort: autoEffortFor(text),
           tools: defs,
           execute: (name, args) => executeTool(name, args, process.cwd(), async (command) => {
             if (yolo) return true;
@@ -1099,7 +1129,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         <Box flexDirection="column" marginBottom={1}>
           <Text>{theme.bold("Select a model")}{theme.dim("  ↑/↓ move · Enter select · Esc cancel")}</Text>
           {mode.models ? (
-            <SelectList items={mode.models.map((m) => ({ key: m, label: m, current: m === model }))} selected={mode.selected} max={10} />
+            <SelectList items={mode.models.map((m) => ({ key: m, label: m, hint: MODEL_SPEED_HINTS[m] ?? "", current: m === model }))} selected={mode.selected} max={10} />
           ) : (
             <Spinner label="Loading models" />
           )}
@@ -1199,6 +1229,20 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     </>
   );
 }
+
+/** Latency hints in the model picker (upstream avg, refreshed 2026-10). */
+const MODEL_SPEED_HINTS: Record<string, string> = {
+  "deepseek-v4.1-flash": "fastest · 4s · $0.20/1M",
+  "deepseek-v4-flash-0731": "fast · 4s · $0.25/1M",
+  "glm-5.2": "fast · 6s · $0.45/1M",
+  "kimi-k3": "quick · 7s · 1M ctx",
+  "glm-5.3-flash": "quick · 9s · $0.12/1M",
+  "glm-5.3-flash-uncensored": "quick · 9s · uncensored",
+  "glm-5.3": "smart · 12s · best for agents",
+  "glm-5.3-uncensored": "smart · 12s · uncensored",
+  "glm-5.3-flash-abliterated": "slow · 26s · chat-oriented",
+  "deepseek-v4-pro-0813": "smart · slow thinker",
+};
 
 const EFFORT_HINTS: Record<Effort, string> = {
   auto: "the model decides (default)",
