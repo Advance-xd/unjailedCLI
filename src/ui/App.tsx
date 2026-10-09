@@ -4,6 +4,7 @@ import { AbortedError, ApiError, listModels, streamChat, agentTurn, type AgentMe
 import { COMMANDS, filterCommands, parseCommand } from "../commands.js";
 import { configPath, deleteKey, EFFORTS, maskKey, readConfig, resolveBaseUrl, resolveKey, writeConfig, type Effort, type KeySource } from "../config.js";
 import { executeTool, toolDefinitions } from "../tools.js";
+import { currentVersion, latestVersion, runSelfUpdate } from "../updater.js";
 import { createSkill, loadSkills, projectSkillsDir, skillsSystemPrompt, userSkillsDir, type Skill } from "../skills.js";
 import { DEFAULT_MODEL } from "../constants.js";
 import { renderMarkdown } from "../markdown.js";
@@ -46,7 +47,7 @@ type Mode =
   | { type: "picker"; models: string[] | null; selected: number }
   | { type: "sessions"; list: SessionMeta[]; selected: number; scope: "folder" | "all"; confirmDelete: boolean }
   | { type: "effort"; selected: number }
-  | { type: "skills"; list: Skill[]; selected: number };
+  | { type: "skills"; list: Skill[]; selected: number }
 
 interface Stream {
   text: string; // not yet flushed to the transcript
@@ -92,6 +93,10 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
   const [effort, setEffort] = useState<Effort>(() => readConfig().effort ?? "auto");
   // Agent tools: "off" | "read" (read_file+list_dir) | "cmds" (+run_command, confirmed) | "yolo" (+run_command, no confirm)
   const [toolsMode, setToolsMode] = useState<"off" | "read" | "cmds" | "yolo">(() => readConfig().tools ?? "off");
+  /** Agent autonomy: ask (default) confirms commands · auto runs them · plan drafts first */
+  const [autoMode, setAutoMode] = useState<"ask" | "auto">(() => (readConfig().autoMode === "auto" ? "auto" : "ask"));
+  /** Plan mode: model writes a plan first, user approves, then it executes */
+  const [planMode, setPlanMode] = useState<"off" | "on">(() => (readConfig().plan === false ? "off" : "on"));
   // Skills switched on for this chat (by name). Their files are re-read on every request.
   const [activeSkills, setActiveSkills] = useState<string[]>([]);
 
@@ -220,7 +225,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     let outcome: "done" | "stopped" | "error" = "done";
     let errMsg = "";
     const useTools = toolsMode !== "off";
-    const yolo = toolsMode === "yolo";
+    const yolo = toolsMode === "yolo" || autoMode === "auto";
 
     try {
       const baseMessages = withSkills(messages.current);
@@ -241,9 +246,21 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
       if (!useTools) {
         await streamChat(baseUrl, auth.key, model, baseMessages, streamHandlers, ctrl.signal, { effort });
       } else {
-        // agent loop: definitions + executor; run_command asks unless yolo
+        // agent loop: definitions + executor; run_command asks unless yolo/auto
         const defs = toolDefinitions(toolsMode);
         const history: AgentMessage[] = [...baseMessages];
+
+        // ── plan mode: mutating jobs get a numbered plan + explicit approval first ──
+        if (planMode === "on" && (toolsMode === "cmds" || toolsMode === "yolo") && /\b(write|edit|create|delete|remove|install|run|fix|refactor|build|deploy|move|rename)\b/i.test(text)) {
+          const approved = await planFirst(history, ctrl);
+          if (!approved) {
+            if (full.trim()) messages.current.push({ role: "assistant", content: full });
+            setStream(null);
+            abortRef.current = null;
+            return;
+          }
+        }
+
         const finalText = await agentTurn(baseUrl, auth.key, model, history, {
           ...streamHandlers,
           onToolCall: (name, args) => {
@@ -535,8 +552,15 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         return skillsCommand(cmd.arg);
       case "tools":
         return toolsCommand(cmd.arg);
+      case "auto":
+      case "bypass":
+        return autoCommand(cmd.name, cmd.arg);
+      case "plan":
+        return planCommand(cmd.arg);
       case "api":
         return apiInfo();
+      case "update":
+        return updateCommand();
       case "model":
         return chooseModel(cmd.arg);
     }
@@ -565,8 +589,100 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
 
   const connectedLine = (ms: number, count: number) => `Connected · ${ms} ms · ${count} model${count === 1 ? "" : "s"} available`;
 
-  const apiInfo = async () => {
-    push({ kind: "plain", text: apiLines(auth.key, auth.source, model) });
+  // ---------- /auto (bypass) & /plan ----------
+
+  /** Plan mode: before mutating work, get a numbered plan and explicit yes/no. */
+  const planFirst = async (history: AgentMessage[], ctrl: AbortController): Promise<boolean> => {
+    info("Plan mode — drafting a plan before any changes…");
+    let plan = "";
+    try {
+      await streamChat(baseUrl, auth.key!, model, [
+        ...history.filter((m) => m.role !== "tool"),
+        { role: "user", content: "Before doing anything: reply with ONLY a short numbered plan (max 8 steps, one line each) for exactly this task. No prose before or after. You will not execute anything yet." },
+      ] as ChatMessage[], {
+        onToken: (t) => { plan += t; },
+      }, ctrl.signal, { effort });
+    } catch {
+      // planner failed → fall through to normal flow rather than blocking the user
+      info("Plan draft failed — proceeding without a plan.");
+      return true;
+    }
+    const trimmed = plan.trim();
+    if (!trimmed || !/^\s*1[.)]/m.test(trimmed)) return true; // didn't produce a plan; just run
+    const steps = trimmed.split("\n").map((l) => l.trim()).filter((l) => /^\d+[.)]/.test(l)).slice(0, 8);
+    push({ kind: "plain", text: `${theme.bold("Plan")}${theme.dim("  · Enter approve · Esc or n reject")}\n${steps.map((s) => "  " + theme.brand(s)).join("\n")}` });
+    const approved = await askPlanApprove();
+    if (approved) success("Plan approved — executing.");
+    else info("Plan rejected. Tell me what to change, or rephrase the task.");
+    return approved;
+  };
+
+  const planAnswerRef = useRef<((yes: boolean) => void) | null>(null);
+  const askPlanApprove = (): Promise<boolean> => {
+    return new Promise((resolve) => {
+      planAnswerRef.current = (yes) => {
+        planAnswerRef.current = null;
+        resolve(yes);
+      };
+    });
+  };
+
+  const autoCommand = (from: string, arg: string) => {
+    const off = arg.toLowerCase() === "off";
+    if (off) {
+      setAutoMode("ask");
+      writeConfig({ autoMode: "ask" });
+      success("Auto mode off — run_command asks before executing again.");
+      return;
+    }
+    setAutoMode("auto");
+    writeConfig({ autoMode: "auto" });
+    const label = from === "bypass" ? "/bypass" : "/auto";
+    success(`${label} on — the agent runs commands without asking. /auto off to restore confirmations.`);
+    if (toolsMode !== "cmds" && toolsMode !== "yolo") info("(No commands to auto-run yet — turn on /tools cmds first.)");
+  };
+
+  const planCommand = (arg: string) => {
+    const off = arg.toLowerCase() === "off";
+    if (off) {
+      setPlanMode("off");
+      writeConfig({ plan: false });
+      success("Plan mode off — the agent acts directly.");
+      return;
+    }
+    setPlanMode("on");
+    writeConfig({ plan: true });
+    success("Plan mode on — the agent drafts a numbered plan before making changes; you approve it.");
+    info("Plan mode applies to jobs that write files or run commands. Reading and searching never needs a plan.");
+  };
+
+  // ---------- /update ----------
+
+  const updateCommand = async () => {
+    const cur = currentVersion();
+    setBusy("Checking npm for updates");
+    const latest = await latestVersion();
+    if (!latest) {
+      setBusy(null);
+      error("Couldn't reach npm. Check your connection and try again.");
+      return;
+    }
+    if (cur === latest) {
+      setBusy(null);
+      success(`You're on the latest version (${cur}).`);
+      return;
+    }
+    info(`Updating ${cur} → ${latest}…`);
+    setBusy("Updating via npm");
+    const ok = await runSelfUpdate((line) => {
+      if (line.trim()) info(line.trim().slice(0, 120));
+    });
+    setBusy(null);
+    if (ok) success(`Updated to ${latest}. Restart the CLI to run the new version.`);
+    else error("The update didn't finish cleanly. Run: npm install -g unjailed@latest");
+  };
+
+  const apiInfo = async () => {    push({ kind: "plain", text: apiLines(auth.key, auth.source, model) });
     if (!auth.key) {
       error(`Connection not checked. ${NOT_LOGGED_IN}`);
       return;
@@ -751,6 +867,11 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
       toolAnswerRef.current(false);
       return;
     }
+    // plan approval: Enter = yes, Esc or n = no
+    if (planAnswerRef.current) {
+      if (key.return && !key.shift) { planAnswerRef.current(true); return; }
+      if (key.escape || input.trim().toLowerCase() === "n") { planAnswerRef.current(false); return; }
+    }
     if (key.escape && abortRef.current && (stream || busy)) {
       abortRef.current.abort();
       return;
@@ -866,7 +987,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
 
   const width = size.columns;
   // You can keep typing while a reply streams; Enter waits until it's done.
-  const promptActive = (mode.type === "chat" || (mode.type === "login" && !busy)) && confirmingCommand === null;
+  const promptActive = (mode.type === "chat" || (mode.type === "login" && !busy)) && confirmingCommand === null && planAnswerRef.current === null;
 
   if (exiting) {
     return (
@@ -998,7 +1119,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         </Box>
       )}
 
-      <StatusLine width={width} model={model} effort={effort} skills={activeSkills.length} toolsMode={toolsMode} loggedIn={!!auth.key} keyMasked={maskKey(auth.key)} flash={flash} streaming={!!stream} />
+      <StatusLine width={width} model={model} effort={effort} skills={activeSkills.length} toolsMode={toolsMode} autoMode={autoMode} planMode={planMode} loggedIn={!!auth.key} keyMasked={maskKey(auth.key)} flash={flash} streaming={!!stream} />
     </>
   );
 }
@@ -1010,8 +1131,8 @@ const EFFORT_HINTS: Record<Effort, string> = {
   high: "thinks longest — slower, uses more tokens",
 };
 
-function StatusLine({ width, model, effort, skills, toolsMode, loggedIn, keyMasked, flash, streaming }: { width: number; model: string; effort: Effort; skills: number; toolsMode: "off" | "read" | "cmds" | "yolo"; loggedIn: boolean; keyMasked: string; flash: string | null; streaming: boolean }) {
-  const extras = `${effort !== "auto" ? theme.dim(` · effort ${effort}`) : ""}${skills ? theme.dim(` · ${skills} skill${skills === 1 ? "" : "s"}`) : ""}${toolsMode !== "off" ? theme.dim(` · tools ${toolsMode}`) : ""}`;
+function StatusLine({ width, model, effort, skills, toolsMode, autoMode, planMode, loggedIn, keyMasked, flash, streaming }: { width: number; model: string; effort: Effort; skills: number; toolsMode: "off" | "read" | "cmds" | "yolo"; autoMode: "ask" | "auto"; planMode: "off" | "on"; loggedIn: boolean; keyMasked: string; flash: string | null; streaming: boolean }) {
+  const extras = `${effort !== "auto" ? theme.dim(` · effort ${effort}`) : ""}${skills ? theme.dim(` · ${skills} skill${skills === 1 ? "" : "s"}`) : ""}${toolsMode !== "off" ? theme.dim(` · tools ${toolsMode}`) : ""}${autoMode === "auto" ? theme.warn(" · auto") : ""}${planMode === "on" ? theme.dim(" · plan") : ""}`;
   const left = `${theme.brand("◆")} ${model}${extras}  ${theme.dim("·")}  ${loggedIn ? theme.ok("● Logged in") + theme.dim(` ${keyMasked}`) : theme.warn("○ Not logged in") + theme.dim(" — type /login")}`;
   const right = flash ? theme.warn(flash) : width < 72 ? "" : theme.dim(streaming ? "Esc to stop" : "/ for commands");
   return (

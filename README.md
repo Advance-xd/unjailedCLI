@@ -52,6 +52,9 @@ Type `/` to open the command menu. Use ↑/↓ to move, Enter or Tab to select, 
 | `/skills` | Switch skills on or off for this chat (Space toggles). `/skills <name>` toggles one; `/skills new <name>` creates one. |
 | `/tools` | Agent tools. No argument: the model can read files and list directories. `cmds` adds run_command (it asks before each run), `yolo` skips asking, `off` disables. |
 | `/api` | Show the base URL, masked key and current model, and run a live connection check. |
+| `/update` | Update the CLI to the latest version from npm. |
+| `/auto` (`/bypass`) | Auto-approve tool calls — the agent stops asking and just works. `/auto off` restores confirmations. |
+| `/plan` | Plan mode: before writing files or running commands, the agent shows a numbered plan — Enter approves, Esc rejects. `/plan off` disables. |
 | `/resume` | Pick up a previous chat from the current folder. `/resume 2` or `/resume <id>` jumps straight to one. |
 | `/sessions` | Browse saved chats from every folder: resume one, or press `d` to delete it. |
 | `/clear` | Start a new chat and clear the screen. The previous chat stays saved. |
