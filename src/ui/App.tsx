@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Static, Text, useApp, useInput, useStdout, type Key } from "ink";
-import { AbortedError, ApiError, listModels, streamChat, type ChatMessage } from "../api.js";
+import { AbortedError, ApiError, listModels, streamChat, agentTurn, type AgentMessage, type ChatMessage } from "../api.js";
 import { COMMANDS, filterCommands, parseCommand } from "../commands.js";
 import { configPath, deleteKey, EFFORTS, maskKey, readConfig, resolveBaseUrl, resolveKey, writeConfig, type Effort, type KeySource } from "../config.js";
+import { executeTool, toolDefinitions } from "../tools.js";
 import { createSkill, loadSkills, projectSkillsDir, skillsSystemPrompt, userSkillsDir, type Skill } from "../skills.js";
 import { DEFAULT_MODEL } from "../constants.js";
 import { renderMarkdown } from "../markdown.js";
@@ -89,6 +90,8 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
   const [baseUrl] = useState(() => resolveBaseUrl());
   const [model, setModel] = useState(() => process.env.UNJAILED_MODEL || readConfig().model || DEFAULT_MODEL);
   const [effort, setEffort] = useState<Effort>(() => readConfig().effort ?? "auto");
+  // Agent tools: "off" | "read" (read_file+list_dir) | "cmds" (+run_command, confirmed) | "yolo" (+run_command, no confirm)
+  const [toolsMode, setToolsMode] = useState<"off" | "read" | "cmds" | "yolo">(() => readConfig().tools ?? "off");
   // Skills switched on for this chat (by name). Their files are re-read on every request.
   const [activeSkills, setActiveSkills] = useState<string[]>([]);
 
@@ -216,28 +219,56 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     setStream({ text: "", started: false, reasoning: false, flushed: false });
     let outcome: "done" | "stopped" | "error" = "done";
     let errMsg = "";
+    const useTools = toolsMode !== "off";
+    const yolo = toolsMode === "yolo";
+
     try {
-      await streamChat(
-        baseUrl,
-        auth.key,
-        model,
-        withSkills(messages.current),
-        {
-          onToken: (t) => {
-            full += t;
-            pending += t;
-            schedule();
-          },
-          onReasoning: () => {
-            if (!reasoning) {
-              reasoning = true;
-              schedule();
-            }
-          },
+      const baseMessages = withSkills(messages.current);
+      const streamHandlers = {
+        onToken: (t: string) => {
+          full += t;
+          pending += t;
+          schedule();
         },
-        ctrl.signal,
-        { effort },
-      );
+        onReasoning: () => {
+          if (!reasoning) {
+            reasoning = true;
+            schedule();
+          }
+        },
+      };
+
+      if (!useTools) {
+        await streamChat(baseUrl, auth.key, model, baseMessages, streamHandlers, ctrl.signal, { effort });
+      } else {
+        // agent loop: definitions + executor; run_command asks unless yolo
+        const defs = toolDefinitions(toolsMode === "cmds" || toolsMode === "yolo");
+        const history: AgentMessage[] = [...baseMessages];
+        const finalText = await agentTurn(baseUrl, auth.key, model, history, {
+          ...streamHandlers,
+          onToolCall: (name, args) => {
+            push({ kind: "info", text: `⚙ ${name} ${clipArgs(args)}` });
+          },
+          onToolResult: (name, ok, output) => {
+            push({ kind: ok ? "info" : "error", text: ok ? `↳ ${clipResult(output)}` : `↳ failed: ${clipResult(output)}` });
+          },
+        }, ctrl.signal, {
+          effort,
+          tools: defs,
+          execute: (name, args) => executeTool(name, args, process.cwd(), async (command) => {
+            if (yolo) return true;
+            push({ kind: "plain", text: `${theme.warn("Run this command?")}\n  ${command}` });
+            setConfirmingCommand(command);
+            const answer = await askYesNo();
+            if (!answer) info("Skipped by user.");
+            return answer;
+          }),
+        });
+        // keep transcript consistent when the final text already streamed
+        if (finalText && !full.trim()) { full = finalText; }
+        // agent history (with tool messages) becomes the conversation
+        messages.current = history.filter((m) => m.role !== "system" && m.role !== "tool") as ChatMessage[];
+      }
     } catch (err) {
       if (err instanceof AbortedError) outcome = "stopped";
       else {
@@ -349,6 +380,55 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
 
   // ---------- skills & effort ----------
 
+  /** Wait for a single y/N keystroke while a tool wants to run a command. */
+  const askYesNo = (): Promise<boolean> => {
+    return new Promise((resolve) => {
+      toolAnswerRef.current = (yes) => {
+        toolAnswerRef.current = null;
+        setConfirmingCommand(null);
+        resolve(yes);
+      };
+    });
+  };
+  const toolAnswerRef = useRef<((yes: boolean) => void) | null>(null);
+  const [confirmingCommand, setConfirmingCommand] = useState<string | null>(null);
+
+  const clipArgs = (s: string) => (s.length > 80 ? s.slice(0, 80) + "…" : s);
+  const clipResult = (s: string) => {
+    const first = s.split("\n").slice(0, 4).join("\n");
+    return first.length > 200 ? first.slice(0, 200) + "…" : first || "(no output)";
+  };
+
+  const toolsCommand = (arg: string) => {
+    const next = arg.toLowerCase();
+    if (next === "" || next === "on" || next === "read") {
+      setToolsMode("read");
+      writeConfig({ tools: "read" });
+      success("Agent tools on — the model can read files and list directories.");
+      info("Add /tools cmds to let it run commands (it asks first), /tools yolo to skip asking, /tools off to disable.");
+      return;
+    }
+    if (next === "cmds" || next === "commands") {
+      setToolsMode("cmds");
+      writeConfig({ tools: "cmds" });
+      success("Agent tools on — read files, list directories, and run commands (you confirm each one).");
+      return;
+    }
+    if (next === "yolo") {
+      setToolsMode("yolo");
+      writeConfig({ tools: "yolo" });
+      success("Agent tools on — commands run WITHOUT confirmation. You asked for it.");
+      return;
+    }
+    if (next === "off") {
+      setToolsMode("off");
+      writeConfig({ tools: "off" });
+      success("Agent tools off — plain chat.");
+      return;
+    }
+    error("Usage: /tools [off|cmds|yolo] — no argument turns on read-only tools.");
+  };
+
   /** The messages to send: a system message with the active skills (read fresh from disk), then the chat. */
   const withSkills = (msgs: ChatMessage[]): ChatMessage[] => {
     if (activeSkills.length === 0) return msgs;
@@ -453,6 +533,8 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         return effortCommand(cmd.arg);
       case "skills":
         return skillsCommand(cmd.arg);
+      case "tools":
+        return toolsCommand(cmd.arg);
       case "api":
         return apiInfo();
       case "model":
@@ -660,6 +742,15 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
 
   // Global keys: Ctrl+C stops / cancels / exits, Ctrl+D exits.
   useInput((input, key) => {
+    // pending run_command approval: y runs, anything else declines
+    if (toolAnswerRef.current && input && !key.ctrl && !key.escape) {
+      toolAnswerRef.current(input.trim().toLowerCase() === "y");
+      return;
+    }
+    if (key.escape && toolAnswerRef.current) {
+      toolAnswerRef.current(false);
+      return;
+    }
     if (key.escape && abortRef.current && (stream || busy)) {
       abortRef.current.abort();
       return;
@@ -775,7 +866,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
 
   const width = size.columns;
   // You can keep typing while a reply streams; Enter waits until it's done.
-  const promptActive = mode.type === "chat" || (mode.type === "login" && !busy);
+  const promptActive = (mode.type === "chat" || (mode.type === "login" && !busy)) && confirmingCommand === null;
 
   if (exiting) {
     return (
@@ -907,7 +998,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         </Box>
       )}
 
-      <StatusLine width={width} model={model} effort={effort} skills={activeSkills.length} loggedIn={!!auth.key} keyMasked={maskKey(auth.key)} flash={flash} streaming={!!stream} />
+      <StatusLine width={width} model={model} effort={effort} skills={activeSkills.length} toolsMode={toolsMode} loggedIn={!!auth.key} keyMasked={maskKey(auth.key)} flash={flash} streaming={!!stream} />
     </>
   );
 }
@@ -919,8 +1010,8 @@ const EFFORT_HINTS: Record<Effort, string> = {
   high: "thinks longest — slower, uses more tokens",
 };
 
-function StatusLine({ width, model, effort, skills, loggedIn, keyMasked, flash, streaming }: { width: number; model: string; effort: Effort; skills: number; loggedIn: boolean; keyMasked: string; flash: string | null; streaming: boolean }) {
-  const extras = `${effort !== "auto" ? theme.dim(` · effort ${effort}`) : ""}${skills ? theme.dim(` · ${skills} skill${skills === 1 ? "" : "s"}`) : ""}`;
+function StatusLine({ width, model, effort, skills, toolsMode, loggedIn, keyMasked, flash, streaming }: { width: number; model: string; effort: Effort; skills: number; toolsMode: "off" | "read" | "cmds" | "yolo"; loggedIn: boolean; keyMasked: string; flash: string | null; streaming: boolean }) {
+  const extras = `${effort !== "auto" ? theme.dim(` · effort ${effort}`) : ""}${skills ? theme.dim(` · ${skills} skill${skills === 1 ? "" : "s"}`) : ""}${toolsMode !== "off" ? theme.dim(` · tools ${toolsMode}`) : ""}`;
   const left = `${theme.brand("◆")} ${model}${extras}  ${theme.dim("·")}  ${loggedIn ? theme.ok("● Logged in") + theme.dim(` ${keyMasked}`) : theme.warn("○ Not logged in") + theme.dim(" — type /login")}`;
   const right = flash ? theme.warn(flash) : width < 72 ? "" : theme.dim(streaming ? "Esc to stop" : "/ for commands");
   return (

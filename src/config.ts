@@ -9,6 +9,7 @@ export interface StoredConfig {
   model?: string;
   saveSessions?: boolean;
   effort?: Effort;
+  tools?: "off" | "read" | "cmds" | "yolo";
 }
 
 /** Reasoning effort sent as `reasoning_effort`; "auto" sends nothing and lets the model decide. */
@@ -49,6 +50,7 @@ export function readConfig(): StoredConfig {
   if (typeof raw.model === "string") cfg.model = raw.model;
   if (typeof raw.saveSessions === "boolean") cfg.saveSessions = raw.saveSessions;
   if (typeof raw.effort === "string" && (EFFORTS as readonly string[]).includes(raw.effort)) cfg.effort = raw.effort as Effort;
+  if (raw.tools === "off" || raw.tools === "read" || raw.tools === "cmds" || raw.tools === "yolo") cfg.tools = raw.tools;
   if (!cfg.apiKey) {
     const legacy = readJson(legacyAuthPath());
     if (typeof legacy.key === "string") cfg.apiKey = legacy.key;

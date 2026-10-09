@@ -131,9 +131,22 @@ export interface StreamHandlers {
   onReasoning?: (text: string) => void;
 }
 
+/** A function call the model wants made. Arguments stream in as fragments. */
+export interface ToolCallAccum {
+  index: number;
+  id?: string;
+  name?: string;
+  args: string;
+}
+
+export interface AgentStreamResult {
+  toolCalls: Array<{ id: string; name: string; args: string }>;
+}
+
 /**
  * POST /chat/completions with stream:true and feed tokens to the handlers.
  * Rejects with AbortedError if `signal` fires, ApiError for anything user-facing.
+ * When options.tools is set, accumulates streamed tool_calls and returns them.
  */
 export async function streamChat(
   baseUrl: string,
@@ -142,8 +155,8 @@ export async function streamChat(
   messages: ChatMessage[],
   handlers: StreamHandlers,
   signal: AbortSignal,
-  options: { effort?: string } = {},
-): Promise<void> {
+  options: { effort?: string; tools?: unknown[]; toolChoice?: unknown } = {},
+): Promise<AgentStreamResult | undefined> {
   const { res, controller } = await request(baseUrl, "/chat/completions", {
     method: "POST",
     key,
@@ -152,6 +165,8 @@ export async function streamChat(
       model,
       messages,
       stream: true,
+      ...(options.tools && options.tools.length ? { tools: options.tools } : {}),
+      ...(options.toolChoice !== undefined ? { tool_choice: options.toolChoice } : {}),
       ...(options.effort && options.effort !== "auto" ? { reasoning_effort: options.effort } : {}),
     }),
   });
@@ -162,9 +177,19 @@ export async function streamChat(
   if (!contentType.includes("event-stream")) {
     // Some servers ignore stream:true; accept a plain JSON completion too.
     try {
-      const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-      const text = json.choices?.[0]?.message?.content;
-      if (typeof text === "string") return handlers.onToken(text);
+      const json = (await res.json()) as {
+        choices?: { message?: { content?: string; tool_calls?: Array<{ id?: string; index?: number; function?: { name?: string; arguments?: string } }> } }[];
+      };
+      const msg = json.choices?.[0]?.message;
+      if (msg?.tool_calls?.length) {
+        const accum = new Map<number, ToolCallAccum>();
+        msg.tool_calls.forEach((tc, i) => {
+          accum.set(tc.index ?? i, { index: tc.index ?? i, id: tc.id, name: tc.function?.name, args: tc.function?.arguments ?? "{}" });
+        });
+        return finishTools(accum);
+      }
+      const text = msg?.content;
+      if (typeof text === "string") { handlers.onToken(text); return undefined; }
     } catch {
       /* fall through */
     }
@@ -176,6 +201,7 @@ export async function streamChat(
   let buffer = "";
   let idleTimedOut = false;
   let idle: NodeJS.Timeout | undefined;
+  const toolAccum = new Map<number, ToolCallAccum>();
   const armIdle = () => {
     clearTimeout(idle);
     idle = setTimeout(() => {
@@ -198,7 +224,7 @@ export async function streamChat(
         if (!line.startsWith("data:")) continue;
         const data = line.slice(5).trim();
         if (!data) continue;
-        if (data === "[DONE]") return;
+        if (data === "[DONE]") return finishTools(toolAccum);
         let evt: any;
         try {
           evt = JSON.parse(data);
@@ -213,8 +239,20 @@ export async function streamChat(
         const reasoning = delta.reasoning_content ?? delta.reasoning;
         if (typeof reasoning === "string" && reasoning) handlers.onReasoning?.(reasoning);
         if (typeof delta.content === "string" && delta.content) handlers.onToken(delta.content);
+        // OpenAI-style streamed tool calls: fragments keyed by index
+        if (Array.isArray(delta.tool_calls)) {
+          for (const tc of delta.tool_calls) {
+            const idx = typeof tc.index === "number" ? tc.index : 0;
+            let slot = toolAccum.get(idx);
+            if (!slot) { slot = { index: idx, args: "" }; toolAccum.set(idx, slot); }
+            if (tc.id) slot.id = tc.id;
+            if (tc.function?.name) slot.name = tc.function.name;
+            if (typeof tc.function?.arguments === "string") slot.args += tc.function.arguments;
+          }
+        }
       }
     }
+    return finishTools(toolAccum);
   } catch (err) {
     if (signal.aborted) throw new AbortedError();
     if (idleTimedOut) throw new ApiError("The response stalled and timed out. Try again.");
@@ -227,4 +265,75 @@ export async function streamChat(
       /* already released */
     }
   }
+}
+
+/** Turn accumulated fragments into complete tool calls; undefined if none. */
+function finishTools(accum: Map<number, ToolCallAccum>): AgentStreamResult | undefined {
+  const calls: AgentStreamResult["toolCalls"] = [];
+  for (const slot of [...accum.values()].sort((a, b) => a.index - b.index)) {
+    if (!slot.name) continue;
+    calls.push({ id: slot.id ?? `call_${slot.index}`, name: slot.name!, args: slot.args || "{}" });
+  }
+  return calls.length ? { toolCalls: calls } : undefined;
+}
+
+/* ————— agent loop: run tool calls to completion against the API ————— */
+
+export type AgentMessage =
+  | { role: "system" | "user"; content: string }
+  | { role: "assistant"; content: string; tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> }
+  | { role: "tool"; tool_call_id: string; content: string };
+
+export interface AgentHandlers extends StreamHandlers {
+  onToolCall?: (name: string, args: string) => void;
+  onToolResult?: (name: string, ok: boolean, output: string) => void;
+}
+
+/** One agent turn: stream a response, execute any tool calls, feed results
+ *  back, repeat — up to maxRounds — then return the final assistant text. */
+export async function agentTurn(
+  baseUrl: string,
+  key: string,
+  model: string,
+  history: AgentMessage[],
+  handlers: AgentHandlers,
+  signal: AbortSignal,
+  options: {
+    effort?: string;
+    tools?: unknown[];
+    maxRounds?: number;
+    execute: (name: string, args: Record<string, unknown>) => Promise<{ ok: boolean; output: string }>;
+  },
+): Promise<string> {
+  const maxRounds = options.maxRounds ?? 8;
+  let lastText = "";
+  for (let round = 0; round < maxRounds; round++) {
+    if (signal.aborted) throw new AbortedError();
+    let roundText = "";
+    const res = await streamChat(baseUrl, key, model, history as ChatMessage[], {
+      ...handlers,
+      onToken: (t) => { roundText += t; handlers.onToken(t); },
+    }, signal, { effort: options.effort, tools: options.tools });
+    lastText = roundText || lastText;
+
+    if (!res || res.toolCalls.length === 0) return lastText;
+
+    // record the assistant's tool_calls message
+    history.push({
+      role: "assistant",
+      content: roundText,
+      tool_calls: res.toolCalls.map((c) => ({ id: c.id, type: "function" as const, function: { name: c.name, arguments: c.args } })),
+    });
+
+    for (const call of res.toolCalls) {
+      if (signal.aborted) throw new AbortedError();
+      let args: Record<string, unknown> = {};
+      try { args = JSON.parse(call.args || "{}"); } catch { /* model sent bad json */ }
+      handlers.onToolCall?.(call.name, call.args);
+      const result = await options.execute(call.name, args);
+      handlers.onToolResult?.(call.name, result.ok, result.output);
+      history.push({ role: "tool", tool_call_id: call.id, content: result.output });
+    }
+  }
+  return lastText;
 }

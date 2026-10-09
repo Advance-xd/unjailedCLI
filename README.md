@@ -50,6 +50,7 @@ Type `/` to open the command menu. Use ↑/↓ to move, Enter or Tab to select, 
 | `/model <id>` | Switch straight to a model by its id. |
 | `/effort` | Set reasoning effort: `auto` (default; the model decides), `low`, `medium` or `high`. `/effort high` sets it directly. Remembered between runs. |
 | `/skills` | Switch skills on or off for this chat (Space toggles). `/skills <name>` toggles one; `/skills new <name>` creates one. |
+| `/tools` | Agent tools. No argument: the model can read files and list directories. `cmds` adds run_command (it asks before each run), `yolo` skips asking, `off` disables. |
 | `/api` | Show the base URL, masked key and current model, and run a live connection check. |
 | `/resume` | Pick up a previous chat from the current folder. `/resume 2` or `/resume <id>` jumps straight to one. |
 | `/sessions` | Browse saved chats from every folder: resume one, or press `d` to delete it. |
@@ -86,6 +87,23 @@ Review code like a senior engineer. List bugs first, then style.
 ```
 
 Switched-on skills are sent as a system message with each request and re-read from disk every time, so edits apply straight away. Saved chats remember which skills were on, and `/resume` switches them back on.
+
+## Agent tools
+
+`/tools` gives the model hands: it can read files and list directories on your
+machine, and answer using what it finds. It works the same on Linux, macOS and
+Windows.
+
+| Mode | What the model can do |
+|---|---|
+| `/tools` | Read files (200 KB cap) and list directories |
+| `/tools cmds` | Also run shell commands — you confirm each one with `y` |
+| `/tools yolo` | Also run shell commands — no confirmation |
+| `/tools off` | Plain chat (default) |
+
+Commands run through `cmd /c` on Windows and `/bin/sh -c` elsewhere, with a
+10-second timeout and 20 KB output cap. The choice is saved in your config and
+shown in the status line.
 
 ## Keys
 

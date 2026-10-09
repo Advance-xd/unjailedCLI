@@ -10,6 +10,7 @@ export const COMMANDS: CommandSpec[] = [
   { name: "model", description: "Choose a model", args: "[id]" },
   { name: "effort", description: "Set how hard the model thinks (auto, low, medium, high)", args: "[level]" },
   { name: "skills", description: "Switch skills on or off, or create one", args: "[name|new <name>]" },
+  { name: "tools", description: "Agent tools on/off · \"cmds\" adds run_command · \"yolo\" skips confirm", args: "[off|cmds|yolo]" },
   { name: "api", description: "Show API endpoint, key and connection status" },
   { name: "resume", description: "Continue a previous chat from this folder", args: "[n|id]" },
   { name: "sessions", description: "Browse, resume or delete saved chats" },
