@@ -12,6 +12,8 @@ export interface StoredConfig {
   tools?: "off" | "read" | "cmds" | "yolo";
   autoMode?: "ask" | "auto";
   plan?: boolean;
+  /** true = a broken UNJAILED_API_KEY env var was bypassed; the saved key wins. */
+  ignoreEnvKey?: boolean;
 }
 
 /** Reasoning effort sent as `reasoning_effort`; "auto" sends nothing and lets the model decide. */
@@ -55,6 +57,7 @@ export function readConfig(): StoredConfig {
   if (raw.tools === "off" || raw.tools === "read" || raw.tools === "cmds" || raw.tools === "yolo") cfg.tools = raw.tools;
   if (raw.autoMode === "auto" || raw.autoMode === "ask") cfg.autoMode = raw.autoMode;
   if (typeof raw.plan === "boolean") cfg.plan = raw.plan;
+  if (raw.ignoreEnvKey === true) cfg.ignoreEnvKey = true;
   if (!cfg.apiKey) {
     const legacy = readJson(legacyAuthPath());
     if (typeof legacy.key === "string") cfg.apiKey = legacy.key;
@@ -89,7 +92,8 @@ export function deleteKey(): void {
 }
 
 export function resolveKey(): { key: string | null; source: KeySource } {
-  const env = process.env.UNJAILED_API_KEY?.trim();
+  const ignoreEnv = readConfig().ignoreEnvKey === true;
+  const env = ignoreEnv ? null : process.env.UNJAILED_API_KEY?.trim();
   if (env) return { key: env, source: "env" };
   const k = readConfig().apiKey?.trim();
   return k ? { key: k, source: "config" } : { key: null, source: null };

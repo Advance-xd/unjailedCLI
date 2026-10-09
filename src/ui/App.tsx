@@ -5,6 +5,7 @@ import { COMMANDS, filterCommands, parseCommand } from "../commands.js";
 import { configPath, deleteKey, EFFORTS, maskKey, readConfig, resolveBaseUrl, resolveKey, writeConfig, type Effort, type KeySource } from "../config.js";
 import { executeTool, toolDefinitions } from "../tools.js";
 import { currentVersion, latestVersion, runSelfUpdate } from "../updater.js";
+import { recoverAuth, tryClearEnvKeyWindows } from "../auth-recovery.js";
 import { createSkill, loadSkills, projectSkillsDir, skillsSystemPrompt, userSkillsDir, type Skill } from "../skills.js";
 import { DEFAULT_MODEL } from "../constants.js";
 import { renderMarkdown } from "../markdown.js";
@@ -167,12 +168,17 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
           return fallback;
         });
       })
-      .catch((err) => {
+      .catch(async (err) => {
         if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
-      const src = auth.source === "env" ? "the UNJAILED_API_KEY environment variable" : "the saved key";
-      error(`Your API key from ${src} was rejected. Type /login to enter a new one.` +
-        (auth.source === "env" ? ` (To stop using the env var: remove UNJAILED_API_KEY from your environment${process.platform === "win32" ? " — e.g. [Environment]::SetEnvironmentVariable('UNJAILED_API_KEY', \$null, 'User') then open a new terminal" : ""}.)` : ""));
-    }
+          const healed = await recoverAuth(auth.source === "env" ? "env" : "config");
+          if (healed) {
+            setAuth({ key: healed.key, source: healed.source });
+            success(healed.message);
+            if (healed.action === "switched-saved") tryClearEnvKeyWindows();
+            return;
+          }
+          error("Your API key was rejected. Type /login to enter a new one.");
+        }
       });
     return () => ctrl.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -292,6 +298,18 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
       }
     } catch (err) {
       if (err instanceof AbortedError) outcome = "stopped";
+      else if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+        const healed = await recoverAuth(auth.source === "env" ? "env" : "config");
+        if (healed) {
+          setAuth({ key: healed.key, source: healed.source });
+          success(healed.message + " Send your message again.");
+          if (healed.action === "switched-saved") tryClearEnvKeyWindows();
+          outcome = "stopped"; // swallow; user resends
+        } else {
+          outcome = "error";
+          errMsg = "Your API key was rejected. Type /login to enter a new one.";
+        }
+      }
       else {
         outcome = "error";
         errMsg = friendly(err);
