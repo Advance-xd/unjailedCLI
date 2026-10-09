@@ -310,9 +310,13 @@ export async function agentTurn(
     execute: (name: string, args: Record<string, unknown>) => Promise<{ ok: boolean; output: string }>;
   },
 ): Promise<string> {
-  const maxRounds = options.maxRounds ?? 8;
+  // 40 rounds ≈ a multi-minute build/setup job. The old cap of 8 made the
+  // agent silently stop mid-task ("automode stops working after 5 minutes").
+  const maxRounds = options.maxRounds ?? 40;
+  let exhausted = false;
   let lastText = "";
   for (let round = 0; round < maxRounds; round++) {
+    exhausted = round === maxRounds - 1;
     if (signal.aborted) throw new AbortedError();
     trimHistory(history);
     let roundText = "";
@@ -340,6 +344,9 @@ export async function agentTurn(
       handlers.onToolResult?.(call.name, result.ok, result.output);
       history.push({ role: "tool", tool_call_id: call.id, content: result.output });
     }
+  }
+  if (exhausted) {
+    lastText += "\n\n[task still in progress — send \"continue\" to keep going]";
   }
   return lastText;
 }
