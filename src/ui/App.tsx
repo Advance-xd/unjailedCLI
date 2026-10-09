@@ -180,7 +180,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         });
       })
       .catch(async (err) => {
-        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+        if (err instanceof ApiError && err.status === 401) {
           const healed = await recoverAuth(auth.source === "env" ? "env" : "config");
           if (healed) {
             setAuth({ key: healed.key, source: healed.source });
@@ -345,7 +345,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
       }
     } catch (err) {
       if (err instanceof AbortedError) outcome = "stopped";
-      else if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+      else if (err instanceof ApiError && err.status === 401) {
         const healed = await recoverAuth(auth.source === "env" ? "env" : "config");
         if (healed) {
           setAuth({ key: healed.key, source: healed.source });
@@ -878,7 +878,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
       if (ctrl.signal.aborted) return;
       setEditor(EMPTY);
       const status = err instanceof ApiError ? err.status : undefined;
-      if (status === 401 || status === 403) error("That key was rejected. Check it and paste again, or press Esc to cancel.");
+      if (status === 401) error("That key was rejected. Check it and paste again, or press Esc to cancel.");
       else error(`${friendly(err)} Paste the key to retry, or press Esc to cancel.`);
     } finally {
       abortRef.current = null;

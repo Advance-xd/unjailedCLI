@@ -47,8 +47,11 @@ async function httpError(res: Response): Promise<ApiError> {
   const msg = await serverMessage(res);
   switch (res.status) {
     case 401:
-    case 403:
       return new ApiError("Invalid or revoked API key. Type /login to enter a new one.", res.status);
+    case 403:
+      // 403 has a specific reason from the server (e.g. cli-only models, web-chat
+      // blocks) — show it verbatim instead of masquerading as a key problem.
+      return new ApiError(msg ?? "Access denied for this request.", res.status);
     case 402:
       return new ApiError(msg ?? "Out of credit. Top up at unjailedai.com/dashboard.", res.status);
     case 404:

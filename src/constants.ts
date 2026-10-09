@@ -4,7 +4,7 @@ import fs from "node:fs";
 export const DEFAULT_BASE_URL = "https://unjailedai.com/v1";
 
 /** Used until the user picks one with /model (falls back to the first model the API lists). */
-export const DEFAULT_MODEL = "glm-5.3-uncensored";
+export const DEFAULT_MODEL = "glm-5.3";
 
 export const BRAND_BLUE = "#7DD3FC";
 export const BRAND_DARK = "#0C4A6E";

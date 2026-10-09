@@ -34,7 +34,7 @@ export function latestVersion(): Promise<string | null> {
 /** `npm install -g unjailed@latest`. Streams output via onLine. */
 export function runSelfUpdate(onLine: (line: string) => void): Promise<boolean> {
   return new Promise((resolve) => {
-    const child = spawn(npmCmd(), ["install", "-g", "unjailed@0.9.7"], { shell: true });  // explicit floor; @latest tag can lag
+    const child = spawn(npmCmd(), ["install", "-g", "unjailed@0.9.8"], { shell: true });  // explicit floor; @latest tag can lag
     let ok = true;
     const t = setTimeout(() => { child.kill("SIGKILL"); ok = false; }, 300_000);
     child.stdout?.on("data", (d) => d.toString().split("\n").forEach(onLine));
