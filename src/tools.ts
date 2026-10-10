@@ -88,6 +88,64 @@ export function toolDefinitions(mode: Exclude<ToolsMode, "off">): ToolDef[] {
     {
       type: "function",
       function: {
+        name: "clipboard",
+          description: "Read or write the system clipboard. action: 'read' or 'write'; text required for write. Cross-platform.",
+          parameters: {
+            type: "object",
+            properties: {
+              action: { type: "string", description: "'read' or 'write'" },
+              text: { type: "string", description: "Text to write (for write)" },
+            },
+            required: ["action"],
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "launch_app",
+          description: "Open a file, folder or application with the OS default handler. Windows: 'start', macOS: 'open', Linux: 'xdg-open'. Examples: 'notepad.exe', 'calc', a folder path to open Explorer/Finder, 'code' for VS Code.",
+          parameters: {
+            type: "object",
+            properties: {
+              target: { type: "string", description: "App name or file/folder path" },
+            },
+            required: ["target"],
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "move_file",
+          description: "Move or rename a file/folder. Accepts Desktop/Documents/Downloads shortcuts and ~ paths. Destination parent folders are created.",
+          parameters: {
+            type: "object",
+            properties: {
+              from: { type: "string", description: "Source path" },
+              to: { type: "string", description: "Destination path" },
+            },
+            required: ["from", "to"],
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "delete_file",
+          description: "Delete a file or folder — to the OS trash/recycle bin when the platform allows, permanent only as fallback. Requires cmds/yolo mode.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "File or folder to delete" },
+            },
+            required: ["path"],
+          },
+        },
+      },
+    {
+      type: "function",
+      function: {
         name: "open_url",
         description: "Open a URL (or local file) in the user's default browser.",
         parameters: {
@@ -409,6 +467,101 @@ export async function executeTool(
         }
       }
       return { ok: true, output: results.length ? results.join("\n") : "(no matches)" };
+    }
+
+    if (name === "clipboard") {
+      const action = String(args.action ?? "read");
+      const plat = process.platform;
+      if (action === "write") {
+        const text = String(args.text ?? "");
+        if (!text) return { ok: false, output: "text is required for write" };
+        const cmd = plat === "win32"
+          ? `Set-Clipboard -Value ${JSON.stringify(text)}`
+          : plat === "darwin" ? "pbcopy" : null;
+        if (cmd === null) {
+          // linux: try wl-copy then xclip
+          for (const c of [["wl-copy"], ["xclip", "-selection", "clipboard"]]) {
+            try {
+              const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
+              const r = spawnSync(c[0]!, c.slice(1), { input: text, encoding: "utf8" });
+              if (r.status === 0) return { ok: true, output: "Copied to clipboard." };
+            } catch { /* try next */ }
+          }
+          return { ok: false, output: "No clipboard tool found (install xclip or wl-clipboard)." };
+        }
+        const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
+        const r = plat === "win32"
+          ? spawnSync("powershell.exe", ["-NoProfile", "-Command", cmd], { encoding: "utf8" })
+          : spawnSync("pbcopy", [], { input: text, encoding: "utf8" });
+        return r.status === 0 ? { ok: true, output: "Copied to clipboard." } : { ok: false, output: "Clipboard write failed." };
+      }
+      // read
+      const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
+      const r = plat === "win32"
+        ? spawnSync("powershell.exe", ["-NoProfile", "-Command", "Get-Clipboard"], { encoding: "utf8" })
+        : plat === "darwin"
+          ? spawnSync("pbpaste", [], { encoding: "utf8" })
+          : spawnSync("sh", ["-c", "wl-paste 2>/dev/null || xclip -selection clipboard -o 2>/dev/null"], { encoding: "utf8" });
+      if (r.status !== 0) return { ok: false, output: "Clipboard read failed." };
+      return { ok: true, output: clip(String(r.stdout ?? ""), 5_000) || "(clipboard empty)" };
+    }
+
+    if (name === "launch_app") {
+      const target = String(args.target ?? "");
+      if (!target) return { ok: false, output: "target is required" };
+      const plat = process.platform;
+      try {
+        const file = resolveToolPath(target, cwd);
+        const exists = fs.existsSync(file);
+        const arg = exists ? file : target;
+        if (plat === "win32") spawn("cmd", ["/c", "start", "", arg], { detached: true, stdio: "ignore" }).unref();
+        else if (plat === "darwin") spawn("open", [arg], { detached: true, stdio: "ignore" }).unref();
+        else spawn("xdg-open", [arg], { detached: true, stdio: "ignore" }).unref();
+        return { ok: true, output: `Opened ${target}.` };
+      } catch (e) {
+        return { ok: false, output: `Couldn't launch: ${(e as Error).message}` };
+      }
+    }
+
+    if (name === "move_file") {
+      const from = String(args.from ?? "");
+      const to = String(args.to ?? "");
+      if (!from || !to) return { ok: false, output: "from and to are required" };
+      try {
+        const src = resolveToolPath(from, cwd);
+        const dst = resolveToolPath(to, cwd);
+        if (!fs.existsSync(src)) return { ok: false, output: `${from} not found.` };
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.renameSync(src, dst);
+        return { ok: true, output: `Moved ${from} → ${to}.` };
+      } catch (e) {
+        return { ok: false, output: `Move failed: ${(e as Error).message}` };
+      }
+    }
+
+    if (name === "delete_file") {
+      const p2 = String(args.path ?? "");
+      if (!p2) return { ok: false, output: "path is required" };
+      if (approve && !(await approve(`delete ${p2}`))) return { ok: false, output: "The user declined." };
+      const file = resolveToolPath(p2, cwd);
+      if (!fs.existsSync(file)) return { ok: false, output: `${p2} not found.` };
+      const plat = process.platform;
+      const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
+      // trash when the platform supports it
+      if (plat === "win32") {
+        const r = spawnSync("powershell.exe", ["-NoProfile", "-Command",
+          `Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('${file.replace(/'/g, "''")}', 'OnlyErrorDialogs', 'SendToRecycleBin')`], { encoding: "utf8" });
+        if (r.status === 0) return { ok: true, output: `Sent ${p2} to the Recycle Bin.` };
+      } else if (plat === "darwin") {
+        const r = spawnSync("osascript", ["-e", `tell application \"Finder\" to delete POSIX file \"${file}\"`], { encoding: "utf8" });
+        if (r.status === 0) return { ok: true, output: `Sent ${p2} to Trash.` };
+      } else {
+        const r = spawnSync("gio", ["trash", file], { encoding: "utf8" });
+        if (r.status === 0) return { ok: true, output: `Sent ${p2} to trash.` };
+      }
+      // fallback: permanent
+      fs.rmSync(file, { recursive: true, force: true });
+      return { ok: true, output: `Deleted ${p2} (no trash available — permanent).` };
     }
 
     if (name === "open_url") {
