@@ -35,7 +35,7 @@ export function runSelfUpdate(onLine: (line: string) => void): Promise<boolean> 
     // Always install the latest published version. (This was hardcoded to a
     // fixed version, which froze /update: it reinstalled the same old build
     // forever and could even downgrade a newer install.)
-    const args = "install -g unjailed@latest" + (pre ? " --force" : "");
+    const args = "install -g unjailed@0.10.4" + (pre ? " --force" : "");  // explicit floor; @latest tag can lag
     const child = spawn(npmCmd() + " " + args, { shell: true });
     let ok = true;
     const t = setTimeout(() => { child.kill("SIGKILL"); ok = false; }, 300_000);
