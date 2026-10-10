@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Static, Text, useApp, useInput, useStdout, type Key } from "ink";
-import { AbortedError, ApiError, listModels, streamChatRetry, agentTurn, type AgentMessage, type ChatMessage } from "../api.js";
+import { AbortedError, ApiError, listModels, streamChatRetry, agentTurn, repairToolPairing, toPlainChat, type AgentMessage, type ChatMessage } from "../api.js";
 import { COMMANDS, filterCommands, parseCommand } from "../commands.js";
 import { configPath, deleteKey, EFFORTS, maskKey, readConfig, resolveBaseUrl, resolveKey, writeConfig, type Effort, type KeySource } from "../config.js";
 import { executeTool, toolDefinitions } from "../tools.js";
@@ -9,7 +9,8 @@ import { currentVersion, latestVersion, runSelfUpdate } from "../updater.js";
 import { recoverAuth, tryClearEnvKeyWindows } from "../auth-recovery.js";
 import { createSkill, loadSkills, projectSkillsDir, skillsSystemPrompt, userSkillsDir, type Skill } from "../skills.js";
 import { agentSystemPrompt } from "../system-prompt.js";
-import { DEFAULT_MODEL } from "../constants.js";
+import { DEFAULT_MODEL, DEFAULT_TOOLS } from "../constants.js";
+import { planSteps } from "./plan.js";
 import { renderMarkdown } from "../markdown.js";
 import { theme } from "../theme.js";
 import { Header } from "./Header.js";
@@ -108,12 +109,12 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
   const [baseUrl] = useState(() => resolveBaseUrl());
   const [model, setModel] = useState(() => process.env.UNJAILED_MODEL || readConfig().model || DEFAULT_MODEL);
   const [effort, setEffort] = useState<Effort>(() => readConfig().effort ?? "auto");
-  // Agent tools: "off" | "read" (read_file+list_dir) | "cmds" (+run_command, confirmed) | "yolo" (+run_command, no confirm)
-  const [toolsMode, setToolsMode] = useState<"off" | "read" | "cmds" | "yolo">(() => readConfig().tools ?? "off");
-  /** Agent autonomy: ask (default) confirms commands · auto runs them · plan drafts first */
+  // Agent tools: "off" | "read" (read-only) | "cmds" (default: writes + commands, each confirmed) | "yolo" (no confirm)
+  const [toolsMode, setToolsMode] = useState<"off" | "read" | "cmds" | "yolo">(() => readConfig().tools ?? DEFAULT_TOOLS);
+  /** Agent autonomy: ask (default) confirms commands · auto runs them */
   const [autoMode, setAutoMode] = useState<"ask" | "auto">(() => (readConfig().autoMode === "auto" ? "auto" : "ask"));
-  /** Plan mode: model writes a plan first, user approves, then it executes */
-  const [planMode, setPlanMode] = useState<"off" | "on">(() => (readConfig().plan === false ? "off" : "on"));
+  /** Plan mode (opt-in via /plan): model writes a plan first, user approves, then it executes */
+  const [planMode, setPlanMode] = useState<"off" | "on">(() => (readConfig().plan === true ? "on" : "off"));
   // Skills switched on for this chat (by name). Their files are re-read on every request.
   const [activeSkills, setActiveSkills] = useState<string[]>([]);
 
@@ -135,7 +136,9 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
   const [usage, setUsage] = useState<{ ctx: number; prompt: number; completion: number; approx: boolean } | null>(null);
   const [fx, setFx] = useState<boolean>(() => fxEnabled());
 
-  const messages = useRef<ChatMessage[]>([]);
+  // The conversation, including agent tool calls and their results so later
+  // turns remember what was done. Folded to plain chat wherever tools aren't sent.
+  const messages = useRef<AgentMessage[]>([]);
   const session = useRef<Session | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const exitArmed = useRef(false);
@@ -249,6 +252,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     let reasoning = false;
     let gotUsage = false;
     let timer: NodeJS.Timeout | undefined;
+    let agentHistory: AgentMessage[] | null = null;
 
     const sync = () => {
       timer = undefined;
@@ -312,7 +316,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         // reasoning and finishes with finish_reason=length but no visible text,
         // nudge it to answer and resume (up to 2×) — the same recovery the agent
         // loop already does, so "thinking → empty reply" is fixed here too.
-        const msgs: ChatMessage[] = [...baseMessages];
+        const msgs = [...baseMessages] as ChatMessage[];
         let resumes = 0;
         for (;;) {
           const before = full.length;
@@ -330,11 +334,13 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         // agent loop: definitions + executor; run_command asks unless yolo/auto
         const defs = toolDefinitions(toolsMode);
         const history: AgentMessage[] = [...baseMessages];
+        agentHistory = history;
 
         // ── plan mode: mutating jobs get a numbered plan + explicit approval first ──
         if (planMode === "on" && (toolsMode === "cmds" || toolsMode === "yolo")) {
           const approved = await planFirst(history, ctrl);
           if (!approved) {
+            agentHistory = null;
             if (full.trim()) messages.current.push({ role: "assistant", content: full });
             setStream(null);
             abortRef.current = null;
@@ -390,8 +396,6 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         });
         // keep transcript consistent when the final text already streamed
         if (finalText && !full.trim()) { full = finalText; }
-        // agent history (with tool messages) becomes the conversation
-        messages.current = history.filter((m) => m.role !== "system" && m.role !== "tool") as ChatMessage[];
       }
     } catch (err) {
       if (err instanceof AbortedError) outcome = "stopped";
@@ -420,7 +424,18 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     if (rest.trim()) push({ kind: "assistant", text: rest, first: !flushedAny });
     setStream(null);
 
-    if (full.trim()) messages.current.push({ role: "assistant", content: full });
+    if (agentHistory) {
+      // The agent transcript (tool calls + results + replies) becomes the
+      // conversation — even after a stop, so finished actions aren't forgotten.
+      const h: AgentMessage[] = agentHistory;
+      repairToolPairing(h);
+      messages.current = h.filter((m) => m.role !== "system");
+      if (messages.current[messages.current.length - 1]?.role === "user") {
+        // no round completed (stopped or failed mid-reply)
+        if (full.trim()) messages.current.push({ role: "assistant", content: full });
+        else if (outcome !== "done") messages.current.pop();
+      }
+    } else if (full.trim()) messages.current.push({ role: "assistant", content: full });
     else if (outcome !== "done") messages.current.pop(); // nothing came back; don't leave a dangling turn
     persist();
 
@@ -444,7 +459,8 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     try {
       const s = session.current ?? newSession(process.cwd(), model);
       const first = !session.current;
-      session.current = { ...s, model, skills: activeSkills, title: s.title || titleFrom(messages.current), updated: Date.now(), messages: [...messages.current] };
+      const plain = toPlainChat(messages.current);
+      session.current = { ...s, model, skills: activeSkills, title: s.title || titleFrom(plain), updated: Date.now(), messages: plain };
       saveSession(session.current);
       if (first) pruneSessions();
     } catch {
@@ -607,11 +623,13 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     return parts.length ? parts.join("\n\n") : null;
   };
 
-  /** Prepend the system message (if any) to the chat. Read-only chat (toolsOn
-   *  false) only ever carries skills, so plain chat stays a clean passthrough. */
-  const withSystem = (msgs: ChatMessage[], toolsOn: boolean): ChatMessage[] => {
+  /** Prepend the system message (if any) to the chat. Plain chat (toolsOn
+   *  false) only ever carries skills, and tool traffic is folded into text —
+   *  a request without tools must not contain tool calls. */
+  const withSystem = (msgs: AgentMessage[], toolsOn: boolean): AgentMessage[] => {
     const sys = systemContent(toolsOn);
-    return sys ? [{ role: "system", content: sys }, ...msgs] : msgs;
+    const body: AgentMessage[] = toolsOn ? msgs : toPlainChat(msgs);
+    return sys ? [{ role: "system", content: sys }, ...body] : body;
   };
 
   const toggleSkill = (name: string) => {
@@ -793,24 +811,29 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     let plan = "";
     try {
       await streamChatRetry(baseUrl, auth.key!, model, [
-        ...history.filter((m) => m.role !== "tool"),
+        ...toPlainChat(history),
         { role: "user", content: "Before doing anything: reply with ONLY a short numbered plan (max 8 steps, one line each) for exactly this task. No prose before or after. You will not execute anything yet." },
-      ] as ChatMessage[], {
+      ], {
         onToken: (t) => { plan += t; },
       }, ctrl.signal, { effort });
     } catch {
       info("Plan draft failed — no actions were taken. Retry or use /plan off.");
       return false;
     }
-    const trimmed = plan.trim();
-    if (!trimmed || !/^\s*1[.)]/m.test(trimmed)) { info("No valid plan received — no actions were taken. Retry or use /plan off."); return false; }
-    const steps = trimmed.split("\n").map((l) => l.trim()).filter((l) => /^\d+[.)]/.test(l)).slice(0, 8);
+    const steps = planSteps(plan);
+    if (!steps.length) { info("No valid plan received — no actions were taken. Retry or use /plan off."); return false; }
     push({ kind: "plain", text: `${theme.bold("Draft plan")}\n${steps.map((s) => "  " + theme.brand(s)).join("\n")}` });
     setMode({ type: "plan-approve", steps, selected: 0 });
     const approved = await askPlanApprove();
     setMode({ type: "chat" });
-    if (approved) success("Plan approved — executing.");
-    else info("Plan rejected. Tell me what to change, or rephrase the task.");
+    if (approved) {
+      success("Plan approved — executing.");
+      // the agent works from the plan the user actually approved
+      history.push(
+        { role: "assistant", content: `Plan:\n${steps.join("\n")}` },
+        { role: "user", content: "Plan approved. Carry it out now with your tools." },
+      );
+    } else info("Plan rejected. Tell me what to change, or rephrase the task.");
     return approved;
   };
 
