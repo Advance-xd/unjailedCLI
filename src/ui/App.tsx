@@ -7,6 +7,7 @@ import { executeTool, toolDefinitions } from "../tools.js";
 import { currentVersion, latestVersion, runSelfUpdate } from "../updater.js";
 import { recoverAuth, tryClearEnvKeyWindows } from "../auth-recovery.js";
 import { createSkill, loadSkills, projectSkillsDir, skillsSystemPrompt, userSkillsDir, type Skill } from "../skills.js";
+import { agentSystemPrompt } from "../system-prompt.js";
 import { DEFAULT_MODEL } from "../constants.js";
 import { renderMarkdown } from "../markdown.js";
 import { theme } from "../theme.js";
@@ -266,7 +267,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     const yolo = toolsMode === "yolo" || autoMode === "auto";
 
     try {
-      const baseMessages = withSkills(messages.current);
+      const baseMessages = withSystem(messages.current, useTools);
       const streamHandlers = {
         onToken: (t: string) => {
           full += t;
@@ -570,12 +571,22 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     error("Usage: /tools [off|cmds|yolo] — no argument turns on read-only tools.");
   };
 
-  /** The messages to send: a system message with the active skills (read fresh from disk), then the chat. */
-  const withSkills = (msgs: ChatMessage[]): ChatMessage[] => {
-    if (activeSkills.length === 0) return msgs;
+  /** The system message for a request: the agent operating contract (only when
+   *  tools are on) plus any active skills, read fresh from disk. Null if neither. */
+  const systemContent = (toolsOn: boolean): string | null => {
+    const parts: string[] = [];
+    if (toolsOn && toolsMode !== "off") parts.push(agentSystemPrompt(toolsMode, autoMode, process.cwd()));
     const on = loadSkills().filter((k) => activeSkills.includes(k.name));
-    const system = skillsSystemPrompt(on);
-    return system ? [{ role: "system", content: system }, ...msgs] : msgs;
+    const sk = skillsSystemPrompt(on);
+    if (sk) parts.push(sk);
+    return parts.length ? parts.join("\n\n") : null;
+  };
+
+  /** Prepend the system message (if any) to the chat. Read-only chat (toolsOn
+   *  false) only ever carries skills, so plain chat stays a clean passthrough. */
+  const withSystem = (msgs: ChatMessage[], toolsOn: boolean): ChatMessage[] => {
+    const sys = systemContent(toolsOn);
+    return sys ? [{ role: "system", content: sys }, ...msgs] : msgs;
   };
 
   const toggleSkill = (name: string) => {

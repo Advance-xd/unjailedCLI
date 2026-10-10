@@ -106,3 +106,38 @@ test("abort stops a stream", async () => {
   const p = streamChat(BASE, KEY, "kimi-k3", [{ role: "user", content: "slow" }], { onToken: () => ++n === 2 && ctrl.abort() }, ctrl.signal);
   await assert.rejects(p, (e) => e instanceof AbortedError);
 });
+
+const { agentSystemPrompt, environmentBlock } = await import("../dist/system-prompt.js");
+
+test("agent system prompt: environment + finish-the-task contract, mode-aware", () => {
+  const read = agentSystemPrompt("read", "ask");
+  const cmds = agentSystemPrompt("cmds", "ask");
+  const yolo = agentSystemPrompt("yolo", "auto");
+
+  // always present: identity, environment facts, and the "don't stop early" contract
+  for (const p of [read, cmds, yolo]) {
+    assert.match(p, /autonomous coding agent/i);
+    assert.match(p, /Working directory:/);
+    assert.match(p, /Finish the whole task/i);
+    assert.match(p, /run_command runs through/);
+  }
+
+  // read mode must NOT claim it can run commands or write files
+  assert.match(read, /read-only mode/i);
+  assert.doesNotMatch(read, /Verify your work/i);
+
+  // cmds/yolo get the verify-your-work step and OS command guidance
+  assert.match(cmds, /Verify your work/i);
+  assert.match(cmds, /Commands:/);
+
+  // confirmation wording differs by autonomy
+  assert.match(cmds, /shown to the user to approve/i);
+  assert.match(yolo, /without a confirmation prompt/i);
+});
+
+test("environment block names this OS and never crashes", () => {
+  const env = environmentBlock("/tmp/x");
+  const expected = process.platform === "win32" ? /Windows/ : process.platform === "darwin" ? /macOS/ : /Linux/;
+  assert.match(env, expected);
+  assert.match(env, /Working directory: \/tmp\/x/);
+});
