@@ -91,7 +91,10 @@ function preflightWindows(): boolean {
   if (process.platform !== "win32") return false;
   try {
     // locate the global node_modules like npm does
-    const prefix = execSync("npm config get prefix", { encoding: "utf8", timeout: 20_000 }).trim();
+    const prefix = execSync(`${npmCmd()} config get prefix`, {
+      encoding: "utf8", timeout: 20_000,
+      shell: process.platform === "win32" ? (process.env.ComSpec || "cmd.exe") : "/bin/sh",
+    }).trim();
     const dir = path.join(prefix, "node_modules", "unjailed");
     if (fs.existsSync(dir)) {
       const stamp = Date.now();
