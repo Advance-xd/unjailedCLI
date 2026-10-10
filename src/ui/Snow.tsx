@@ -19,7 +19,9 @@ const GUTTER = 12; // how far in from each edge flakes may fall
 function spawn(width: number, atTop: boolean): Flake {
   const leftSide = Math.random() < 0.5;
   const g = Math.random() < 0.12 ? FX_SPARKLE[Math.floor(Math.random() * FX_SPARKLE.length)]! : FX_SNOW[Math.floor(Math.random() * FX_SNOW.length)]!;
-  const x = leftSide ? Math.floor(Math.random() * GUTTER) : width - 1 - Math.floor(Math.random() * GUTTER);
+  // Keep flakes off the final column — writing the last cell makes some
+  // terminals wrap to a new line, which looked like snow "falling off screen".
+  const x = leftSide ? Math.floor(Math.random() * GUTTER) : width - 2 - Math.floor(Math.random() * GUTTER);
   const y = atTop ? 0 : Math.floor(Math.random() * BAND_H);
   return { x, y, g };
 }
@@ -54,7 +56,7 @@ export function Snow({ width, rows }: { width: number; rows: number }) {
   for (let y = 0; y < BAND_H; y++) {
     const cells = new Array(width).fill(" ");
     for (const f of flakes.current) {
-      if (f.y === y && f.x >= 0 && f.x < width) cells[f.x] = f.g;
+      if (f.y === y && f.x >= 0 && f.x < width - 1) cells[f.x] = f.g;
     }
     lines.push(cells.join("").replace(/\s+$/, ""));
   }
