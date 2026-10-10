@@ -117,7 +117,7 @@ export function toolDefinitions(mode: Exclude<ToolsMode, "off">): ToolDef[] {
         type: "function",
         function: {
           name: "write_file",
-          description: "Create or overwrite a text file with the given content. Parent folders are created.",
+          description: "Create or overwrite a text file with the given content. Parent folders are created automatically. On Windows 11 you can write to user folders directly: \"Desktop/file.txt\", \"Documents/notes.md\", \"Downloads/\", or create project folders like \"Desktop/Code/app.py\" or \"Desktop/Tools/script.ps1\". Also supports ~/ paths.",
           parameters: {
             type: "object",
             properties: {
@@ -168,6 +168,35 @@ export function toolDefinitions(mode: Exclude<ToolsMode, "off">): ToolDef[] {
 export interface ToolResult {
   ok: boolean;
   output: string;
+}
+
+/** Resolve user shortcut folders — Windows 11 friendly.
+ *  "Desktop", "Documents", "Downloads", "Pictures", "Videos", "Music" map to
+ *  the real OS folders (%USERPROFILE%\Desktop on Win11, ~/Desktop elsewhere).
+ *  Anything else returns null (not a shortcut). */
+export function userFolder(name: string): string | null {
+  const home = os.homedir();
+  const map: Record<string, string> = {
+    desktop: path.join(home, "Desktop"),
+    documents: path.join(home, "Documents"),
+    downloads: path.join(home, "Downloads"),
+    pictures: path.join(home, "Pictures"),
+    videos: path.join(home, "Videos"),
+    music: path.join(home, "Music"),
+  };
+  return map[name.toLowerCase()] ?? null;
+}
+
+/** Resolve a tool path: supports "Desktop/foo.txt" style shortcuts + ~ expansion,
+ *  then falls back to cwd-relative. Windows paths (C:\... or backslashes) resolve
+ *  as absolute already. */
+function resolveToolPath(p: string, cwd: string): string {
+  if (p.startsWith("~")) return path.join(os.homedir(), p.slice(1));
+  const parts = p.split(/[\\\\/]/);
+  const firstSeg = parts[0] ?? "";
+  const uf = userFolder(firstSeg);
+  if (uf && parts.length > 1) return path.join(uf, ...parts.slice(1));
+  return path.resolve(cwd, p);
 }
 
 function clip(s: string, max = MAX_RUN_OUTPUT): string {
@@ -322,7 +351,7 @@ export async function executeTool(
     if (name === "read_file") {
       const p = String(args.path ?? "");
       if (!p) return { ok: false, output: "path is required" };
-      const file = path.resolve(cwd, p);
+      const file = resolveToolPath(p, cwd);
       const stat = fs.statSync(file);
       if (stat.isDirectory()) return { ok: false, output: `${p} is a directory (use list_dir)` };
       if (stat.size > MAX_READ_BYTES) return { ok: false, output: `${p} is ${stat.size} bytes — too large (limit ${MAX_READ_BYTES})` };
@@ -332,7 +361,7 @@ export async function executeTool(
 
     if (name === "list_dir") {
       const p = String(args.path ?? ".");
-      const dir = path.resolve(cwd, p);
+      const dir = resolveToolPath(p, cwd);
       const entries = fs.readdirSync(dir, { withFileTypes: true });
       if (entries.length > MAX_LIST) return { ok: true, output: clip(entries.slice(0, MAX_LIST).map((e) => (e.isDirectory() ? e.name + "/" : e.name)).join("\n") + `\n…(${entries.length - MAX_LIST} more)`) };
       return { ok: true, output: entries.map((e) => (e.isDirectory() ? e.name + "/" : e.name)).join("\n") || "(empty)" };
@@ -399,7 +428,7 @@ export async function executeTool(
       const content = String(args.content ?? "");
       if (!p) return { ok: false, output: "path is required" };
       if (content.length > MAX_WRITE_BYTES) return { ok: false, output: `Content too large (${content.length} chars, limit ${MAX_WRITE_BYTES})` };
-      const file = path.resolve(cwd, p);
+      const file = resolveToolPath(p, cwd);
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, content);
       return { ok: true, output: `Wrote ${content.length} chars to ${p}` };
@@ -411,7 +440,7 @@ export async function executeTool(
       const newText = String(args.new_text ?? "");
       const replaceAll = args.replace_all === true;
       if (!p || !oldText) return { ok: false, output: "path and old_text are required" };
-      const file = path.resolve(cwd, p);
+      const file = resolveToolPath(p, cwd);
       const src = fs.readFileSync(file, "utf8");
       const count = src.split(oldText).length - 1;
       if (count === 0) return { ok: false, output: `old_text not found in ${p} — nothing written.` };
