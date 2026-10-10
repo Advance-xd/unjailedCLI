@@ -14,6 +14,7 @@ export const COMMANDS: CommandSpec[] = [
   { name: "auto", description: "Auto-approve tool calls (like yolo, without changing tool set)", args: "[off]" },
   { name: "bypass", description: "Alias of /auto — stop asking, just do" },
   { name: "plan", description: "Plan mode: model drafts a numbered plan before touching anything", args: "[off]" },
+  { name: "fun", description: "Toggle the fun effects (startup wink, side snow, sparkles)", args: "[on|off]" },
   { name: "api", description: "Show API endpoint, key and connection status" },
   { name: "context", description: "Show token/context usage for this chat" },
   { name: "update", description: "Update the CLI to the latest npm version" },
