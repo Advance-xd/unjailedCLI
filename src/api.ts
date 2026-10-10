@@ -175,6 +175,32 @@ function parseUsage(raw: unknown): Usage | undefined {
  * Rejects with AbortedError if `signal` fires, ApiError for anything user-facing.
  * When options.tools is set, accumulates streamed tool_calls and returns them.
  */
+/** streamChat with one automatic retry on server errors (5xx) — upstream
+ *  stalls are transient; retrying once after a short pause fixes most
+ *  "The server had a problem (HTTP 503)" reports without user action. */
+export async function streamChatRetry(
+  baseUrl: string,
+  key: string,
+  model: string,
+  messages: ChatMessage[],
+  handlers: StreamHandlers,
+  signal: AbortSignal,
+  options: { effort?: string; tools?: unknown[]; toolChoice?: unknown } = {},
+): Promise<AgentStreamResult | undefined> {
+  try {
+    return await streamChat(baseUrl, key, model, messages, handlers, signal, options);
+  } catch (err) {
+    if (signal.aborted) throw err;
+    if (err instanceof ApiError && (err.status ?? 0) >= 500) {
+      handlers.onToken?.("\n*(server hiccup — retrying)*\n");
+      await new Promise((r) => setTimeout(r, 1500));
+      if (signal.aborted) throw err;
+      return await streamChat(baseUrl, key, model, messages, handlers, signal, options);
+    }
+    throw err;
+  }
+}
+
 export async function streamChat(
   baseUrl: string,
   key: string,
@@ -358,7 +384,7 @@ export async function agentTurn(
     if (signal.aborted) throw new AbortedError();
     trimHistory(history);
     let roundText = "";
-    const res = await streamChat(baseUrl, key, model, history as ChatMessage[], {
+    const res = await streamChatRetry(baseUrl, key, model, history as ChatMessage[], {
       ...handlers,
       onToken: (t) => { roundText += t; handlers.onToken(t); },
     }, signal, { effort: options.effort, tools: options.tools });

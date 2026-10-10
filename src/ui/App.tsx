@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Static, Text, useApp, useInput, useStdout, type Key } from "ink";
-import { AbortedError, ApiError, listModels, streamChat, agentTurn, type AgentMessage, type ChatMessage } from "../api.js";
+import { AbortedError, ApiError, listModels, streamChatRetry, agentTurn, type AgentMessage, type ChatMessage } from "../api.js";
 import { COMMANDS, filterCommands, parseCommand } from "../commands.js";
 import { configPath, deleteKey, EFFORTS, maskKey, readConfig, resolveBaseUrl, resolveKey, writeConfig, type Effort, type KeySource } from "../config.js";
 import { executeTool, toolDefinitions } from "../tools.js";
@@ -315,7 +315,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         let resumes = 0;
         for (;;) {
           const before = full.length;
-          const res = await streamChat(baseUrl, auth.key, model, msgs, streamHandlers, ctrl.signal, { effort: autoEffortFor(text) });
+          const res = await streamChatRetry(baseUrl, auth.key, model, msgs, streamHandlers, ctrl.signal, { effort: autoEffortFor(text) });
           const producedNothing = full.length === before;
           if (res?.finishReason === "length" && producedNothing && resumes < 2) {
             resumes++;
@@ -792,7 +792,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     info("Plan mode — drafting a plan before any changes…");
     let plan = "";
     try {
-      await streamChat(baseUrl, auth.key!, model, [
+      await streamChatRetry(baseUrl, auth.key!, model, [
         ...history.filter((m) => m.role !== "tool"),
         { role: "user", content: "Before doing anything: reply with ONLY a short numbered plan (max 8 steps, one line each) for exactly this task. No prose before or after. You will not execute anything yet." },
       ] as ChatMessage[], {
