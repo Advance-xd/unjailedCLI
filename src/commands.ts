@@ -15,6 +15,7 @@ export const COMMANDS: CommandSpec[] = [
   { name: "bypass", description: "Alias of /auto — stop asking, just do" },
   { name: "plan", description: "Plan mode: model drafts a numbered plan before touching anything", args: "[off]" },
   { name: "api", description: "Show API endpoint, key and connection status" },
+  { name: "context", description: "Show token/context usage for this chat" },
   { name: "update", description: "Update the CLI to the latest npm version" },
   { name: "resume", description: "Continue a previous chat from this folder", args: "[n|id]" },
   { name: "sessions", description: "Browse, resume or delete saved chats" },

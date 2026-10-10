@@ -141,6 +141,10 @@ const server = http.createServer(async (req, res) => {
       await sleep(delay);
     }
     send({}, "stop");
+    if (lower.includes("usage")) {
+      // OpenAI sends usage as a final choices-less chunk when stream_options.include_usage is set.
+      res.write(`data: ${JSON.stringify({ id: "mock", object: "chat.completion.chunk", model: body.model, choices: [], usage: { prompt_tokens: 123, completion_tokens: 45, total_tokens: 168 } })}\n\n`);
+    }
     res.write("data: [DONE]\n\n");
     res.end();
     return;

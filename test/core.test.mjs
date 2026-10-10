@@ -192,3 +192,16 @@ test("trimHistory shrinks old context without deleting messages or breaking tool
   assert.ok(h[0].role === "system" && h[0].content.startsWith("SYS "), "system message intact");
   assert.equal(h[h.length - 1].content, "finish now", "most recent user turn intact");
 });
+
+test("streamChat surfaces server token usage via onUsage and the result", async () => {
+  let got = null;
+  const res = await streamChat(BASE, KEY, "kimi-k3", [{ role: "user", content: "usage please" }], { onToken() {}, onUsage: (u) => (got = u) }, new AbortController().signal);
+  assert.deepEqual(got, { prompt: 123, completion: 45, total: 168 });
+  assert.deepEqual(res?.usage, { prompt: 123, completion: 45, total: 168 });
+});
+
+test("streamChat without usage leaves onUsage uncalled and doesn't crash", async () => {
+  let called = false;
+  await streamChat(BASE, KEY, "kimi-k3", [{ role: "user", content: "plain hi" }], { onToken() {}, onUsage: () => (called = true) }, new AbortController().signal);
+  assert.equal(called, false);
+});
