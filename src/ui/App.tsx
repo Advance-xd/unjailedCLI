@@ -127,6 +127,9 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
   const [busy, setBusy] = useState<string | null>(null);
   const [stream, setStream] = useState<Stream | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
+  // Token usage for the current conversation: ctx = prompt tokens of the most
+  // recent request (= current context size). approx when the server sent none.
+  const [usage, setUsage] = useState<{ ctx: number; prompt: number; completion: number; approx: boolean } | null>(null);
 
   const messages = useRef<ChatMessage[]>([]);
   const session = useRef<Session | null>(null);
@@ -240,6 +243,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     let reasoningTail = "";
     let flushedAny = false;
     let reasoning = false;
+    let gotUsage = false;
     let timer: NodeJS.Timeout | undefined;
 
     const sync = () => {
@@ -279,6 +283,12 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
           reasoningChars += t ? t.length : 0;
           if (t) reasoningTail = (reasoningTail + t).slice(-90);
           schedule();
+        },
+        onUsage: (u: { prompt: number; completion: number; total: number }) => {
+          gotUsage = true;
+          // In agent mode onUsage fires each round; the latest request's prompt
+          // count is the live context size (last round's completion for "out").
+          setUsage({ ctx: u.prompt, prompt: u.prompt, completion: u.completion, approx: false });
         },
       };
 
@@ -407,6 +417,13 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     else if (outcome !== "done") messages.current.pop(); // nothing came back; don't leave a dangling turn
     persist();
 
+    // Server didn't report usage — show a rough estimate (chars/4), clearly marked.
+    if (!gotUsage) {
+      const chars = messages.current.reduce((n, m) => n + m.content.length, 0);
+      const est = Math.round(chars / 4);
+      setUsage({ ctx: est, prompt: est, completion: Math.round(full.length / 4), approx: true });
+    }
+
     if (outcome === "stopped") info("Stopped.");
     else if (outcome === "error") error(errMsg);
     else if (!full.trim()) info("(no response text — the model may have hit its output limit mid-reasoning; try /effort medium or rephrase)");
@@ -442,6 +459,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
       return;
     }
     session.current = s;
+    setUsage(null); // new context; counts start fresh on the next message
     const available = new Set(loadSkills().map((k) => k.name));
     setActiveSkills((s.skills ?? []).filter((n) => available.has(n)));
     messages.current = [...s.messages];
@@ -669,6 +687,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         return openSessions("all", cmd.arg);
       case "clear":
         messages.current = [];
+        setUsage(null);
         session.current = null; // the old chat stays saved; this starts a new one
         stdout.write("\x1b[2J\x1b[3J\x1b[H");
         setItems([{ id: id(), kind: "header", model, loggedIn: !!auth.key, keySource: auth.source }]);
@@ -694,6 +713,8 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         return planCommand(cmd.arg);
       case "api":
         return apiInfo();
+      case "context":
+        return contextInfo();
       case "update":
         return updateCommand();
       case "model":
@@ -726,6 +747,25 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     ].join("\n");
 
   const connectedLine = (ms: number, count: number) => `Connected · ${ms} ms · ${count} model${count === 1 ? "" : "s"} available`;
+
+  const contextInfo = () => {
+    const count = messages.current.length;
+    if (!usage) {
+      const chars = messages.current.reduce((n, m) => n + m.content.length, 0);
+      push({ kind: "plain", text: [
+        `${theme.dim("Context  ")} ~${fmtTokens(Math.round(chars / 4))} tokens ${theme.dim("(estimated — send a message to get real counts)")}`,
+        `${theme.dim("Messages ")} ${count}`,
+        `${theme.dim("Model    ")} ${model}`,
+      ].join("\n") });
+      return;
+    }
+    push({ kind: "plain", text: [
+      `${theme.dim("Context  ")} ${usage.approx ? "~" : ""}${fmtTokens(usage.ctx)} tokens${usage.approx ? theme.dim(" (estimated)") : ""}`,
+      `${theme.dim("Last turn")} ${fmtTokens(usage.prompt)} in · ${fmtTokens(usage.completion)} out`,
+      `${theme.dim("Messages ")} ${count}`,
+      `${theme.dim("Model    ")} ${model}`,
+    ].join("\n") });
+  };
 
   // ---------- /auto (bypass) & /plan ----------
 
@@ -1336,7 +1376,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         </Box>
       )}
 
-      <StatusLine width={width} model={model} effort={effort} skills={activeSkills.length} toolsMode={toolsMode} autoMode={autoMode} planMode={planMode} loggedIn={!!auth.key} keyMasked={maskKey(auth.key)} flash={flash} streaming={!!stream} queued={queueLen} />
+      <StatusLine width={width} model={model} effort={effort} skills={activeSkills.length} toolsMode={toolsMode} autoMode={autoMode} planMode={planMode} loggedIn={!!auth.key} keyMasked={maskKey(auth.key)} flash={flash} streaming={!!stream} queued={queueLen} ctx={usage ? { tokens: usage.ctx, approx: usage.approx } : null} />
     </>
   );
 }
@@ -1362,8 +1402,15 @@ const EFFORT_HINTS: Record<Effort, string> = {
   high: "thinks longest — slower, uses more tokens",
 };
 
-function StatusLine({ width, model, effort, skills, toolsMode, autoMode, planMode, loggedIn, keyMasked, flash, streaming, queued }: { width: number; model: string; effort: Effort; skills: number; toolsMode: "off" | "read" | "cmds" | "yolo"; autoMode: "ask" | "auto"; planMode: "off" | "on"; loggedIn: boolean; keyMasked: string; flash: string | null; streaming: boolean; queued: number }) {
-  const extras = `${effort !== "auto" ? theme.dim(` · effort ${effort}`) : ""}${skills ? theme.dim(` · ${skills} skill${skills === 1 ? "" : "s"}`) : ""}${toolsMode !== "off" ? theme.dim(` · tools ${toolsMode}`) : ""}${autoMode === "auto" ? theme.warn(" · auto") : ""}${planMode === "on" ? theme.dim(" · plan") : ""}${queued ? theme.warn(` · ${queued} queued`) : ""}`;
+/** Compact token count for the status line: 940, 1.2k, 12.4k, 128k. */
+function fmtTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 100000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+  return Math.round(n / 1000) + "k";
+}
+
+function StatusLine({ width, model, effort, skills, toolsMode, autoMode, planMode, loggedIn, keyMasked, flash, streaming, queued, ctx }: { width: number; model: string; effort: Effort; skills: number; toolsMode: "off" | "read" | "cmds" | "yolo"; autoMode: "ask" | "auto"; planMode: "off" | "on"; loggedIn: boolean; keyMasked: string; flash: string | null; streaming: boolean; queued: number; ctx: { tokens: number; approx: boolean } | null }) {
+  const extras = `${effort !== "auto" ? theme.dim(` · effort ${effort}`) : ""}${skills ? theme.dim(` · ${skills} skill${skills === 1 ? "" : "s"}`) : ""}${toolsMode !== "off" ? theme.dim(` · tools ${toolsMode}`) : ""}${autoMode === "auto" ? theme.warn(" · auto") : ""}${planMode === "on" ? theme.dim(" · plan") : ""}${queued ? theme.warn(` · ${queued} queued`) : ""}${ctx ? theme.dim(` · ${ctx.approx ? "~" : ""}ctx ${fmtTokens(ctx.tokens)}`) : ""}`;
   const left = `${theme.brand("◆")} ${model}${extras}  ${theme.dim("·")}  ${loggedIn ? theme.ok("● Logged in") + theme.dim(` ${keyMasked}`) : theme.warn("○ Not logged in") + theme.dim(" — type /login")}`;
   const right = flash ? theme.warn(flash) : width < 72 ? "" : theme.dim(streaming ? "Esc Esc to skip" : "/ for commands");
   return (

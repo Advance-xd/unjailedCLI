@@ -131,9 +131,18 @@ export async function listModels(baseUrl: string, key: string, signal?: AbortSig
   return data.filter((m) => m && typeof m.id === "string").map((m) => ({ id: m.id as string }));
 }
 
+/** Token counts the server reports for a request (OpenAI `usage` object). */
+export interface Usage {
+  prompt: number;
+  completion: number;
+  total: number;
+}
+
 export interface StreamHandlers {
   onToken: (text: string) => void;
   onReasoning?: (text: string) => void;
+  /** Fired once per request when the server reports token usage. */
+  onUsage?: (usage: Usage) => void;
 }
 
 /** A function call the model wants made. Arguments stream in as fragments. */
@@ -147,6 +156,18 @@ export interface ToolCallAccum {
 export interface AgentStreamResult {
   toolCalls: Array<{ id: string; name: string; args: string }>;
   finishReason?: string | null;
+  usage?: Usage;
+}
+
+/** Pull an OpenAI-style usage object out of a stream chunk or completion. */
+function parseUsage(raw: unknown): Usage | undefined {
+  const u = raw as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null | undefined;
+  if (!u || typeof u !== "object") return undefined;
+  const prompt = Number(u.prompt_tokens ?? 0);
+  const completion = Number(u.completion_tokens ?? 0);
+  const total = Number(u.total_tokens ?? prompt + completion);
+  if (!prompt && !completion && !total) return undefined;
+  return { prompt, completion, total };
 }
 
 /**
@@ -171,6 +192,7 @@ export async function streamChat(
       model,
       messages,
       stream: true,
+      stream_options: { include_usage: true },
       ...(options.tools && options.tools.length ? { tools: options.tools } : {}),
       ...(options.toolChoice !== undefined ? { tool_choice: options.toolChoice } : {}),
       ...(options.effort && options.effort !== "auto" ? { reasoning_effort: options.effort } : {}),
@@ -185,17 +207,20 @@ export async function streamChat(
     try {
       const json = (await res.json()) as {
         choices?: { message?: { content?: string; tool_calls?: Array<{ id?: string; index?: number; function?: { name?: string; arguments?: string } }> } }[];
+        usage?: unknown;
       };
+      const usage = parseUsage(json.usage);
+      if (usage) handlers.onUsage?.(usage);
       const msg = json.choices?.[0]?.message;
       if (msg?.tool_calls?.length) {
         const accum = new Map<number, ToolCallAccum>();
         msg.tool_calls.forEach((tc, i) => {
           accum.set(tc.index ?? i, { index: tc.index ?? i, id: tc.id, name: tc.function?.name, args: tc.function?.arguments ?? "{}" });
         });
-        return finishTools(accum);
+        return finishTools(accum, null, usage);
       }
       const text = msg?.content;
-      if (typeof text === "string") { handlers.onToken(text); return undefined; }
+      if (typeof text === "string") { handlers.onToken(text); return usage ? { toolCalls: [], usage } : undefined; }
     } catch {
       /* fall through */
     }
@@ -209,6 +234,7 @@ export async function streamChat(
   let idle: NodeJS.Timeout | undefined;
   const toolAccum = new Map<number, ToolCallAccum>();
   let finishReason: string | null = null;
+  let usage: Usage | undefined;
   const armIdle = () => {
     clearTimeout(idle);
     idle = setTimeout(() => {
@@ -231,12 +257,16 @@ export async function streamChat(
         if (!line.startsWith("data:")) continue;
         const data = line.slice(5).trim();
         if (!data) continue;
-        if (data === "[DONE]") return finishTools(toolAccum, finishReason);
+        if (data === "[DONE]") return finishTools(toolAccum, finishReason, usage);
         let evt: any;
         try {
           evt = JSON.parse(data);
         } catch {
           continue;
+        }
+        if (evt?.usage) {
+          const u = parseUsage(evt.usage);
+          if (u) { usage = u; handlers.onUsage?.(u); }
         }
         if (evt?.error) {
           const m = typeof evt.error === "string" ? evt.error : evt.error.message;
@@ -261,7 +291,7 @@ export async function streamChat(
         }
       }
     }
-    return finishTools(toolAccum, finishReason);
+    return finishTools(toolAccum, finishReason, usage);
   } catch (err) {
     if (signal.aborted) throw new AbortedError();
     if (idleTimedOut) throw new ApiError("The response stalled and timed out. Try again.");
@@ -276,14 +306,17 @@ export async function streamChat(
   }
 }
 
-/** Turn accumulated fragments into complete tool calls; undefined if none. */
-function finishTools(accum: Map<number, ToolCallAccum>, finishReason: string | null = null): AgentStreamResult | undefined {
+/** Turn accumulated fragments into complete tool calls; undefined if there's
+ *  nothing worth returning (no calls, no length-finish, no usage). */
+function finishTools(accum: Map<number, ToolCallAccum>, finishReason: string | null = null, usage?: Usage): AgentStreamResult | undefined {
   const calls: AgentStreamResult["toolCalls"] = [];
   for (const slot of [...accum.values()].sort((a, b) => a.index - b.index)) {
     if (!slot.name) continue;
     calls.push({ id: slot.id ?? `call_${slot.index}`, name: slot.name!, args: slot.args || "{}" });
   }
-  return calls.length ? { toolCalls: calls, finishReason } : (finishReason === "length" ? { toolCalls: [], finishReason } : undefined);
+  if (calls.length) return { toolCalls: calls, finishReason, usage };
+  if (finishReason === "length" || usage) return { toolCalls: [], finishReason, usage };
+  return undefined;
 }
 
 /* ————— agent loop: run tool calls to completion against the API ————— */
