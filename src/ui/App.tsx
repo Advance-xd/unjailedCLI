@@ -12,6 +12,8 @@ import { DEFAULT_MODEL } from "../constants.js";
 import { renderMarkdown } from "../markdown.js";
 import { theme } from "../theme.js";
 import { Header } from "./Header.js";
+import { Snow, FinishFlourish } from "./Snow.js";
+import { fxEnabled } from "./fx.js";
 import { onFirstLine, onLastLine, Prompt, type EditorState } from "./Prompt.js";
 import { SelectList } from "./SelectList.js";
 import { Spinner, type WorkKind } from "./Spinner.js";
@@ -127,6 +129,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
   const [busy, setBusy] = useState<string | null>(null);
   const [stream, setStream] = useState<Stream | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
+  const [fx, setFx] = useState<boolean>(() => fxEnabled());
 
   const messages = useRef<ChatMessage[]>([]);
   const session = useRef<Session | null>(null);
@@ -648,6 +651,15 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
 
   // ---------- commands ----------
 
+  const funCommand = (arg: string) => {
+    const a = arg.toLowerCase();
+    const next = a === "off" ? false : a === "on" ? true : !fx;
+    setFx(next);
+    writeConfig({ fx: next });
+    if (next) success("Fun effects on — startup wink, side snow and sparkles. /fun off to turn them off.");
+    else info("Fun effects off.");
+  };
+
   const runCommand = async (raw: string) => {
     const cmd = parseCommand(raw);
     if (!cmd) return;
@@ -692,6 +704,8 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         return autoCommand(cmd.name, cmd.arg);
       case "plan":
         return planCommand(cmd.arg);
+      case "fun":
+        return funCommand(cmd.arg);
       case "api":
         return apiInfo();
       case "update":
@@ -1195,6 +1209,9 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
       <Static key={staticKey} items={items}>
         {(item) => <TranscriptItem key={item.id} item={item} width={width} />}
       </Static>
+
+      {fx && <Snow width={width} rows={size.rows} />}
+      {fx && <FinishFlourish streaming={!!stream} />}
 
       {stream && (
         <Box flexDirection="column" marginBottom={1}>

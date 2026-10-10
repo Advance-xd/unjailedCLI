@@ -12,6 +12,8 @@ export interface StoredConfig {
   tools?: "off" | "read" | "cmds" | "yolo";
   autoMode?: "ask" | "auto";
   plan?: boolean;
+  /** Fun visual effects (startup wink, side snow, finish sparkle). Default on. */
+  fx?: boolean;
   /** true = a broken UNJAILED_API_KEY env var was bypassed; the saved key wins. */
   ignoreEnvKey?: boolean;
 }
@@ -57,6 +59,7 @@ export function readConfig(): StoredConfig {
   if (raw.tools === "off" || raw.tools === "read" || raw.tools === "cmds" || raw.tools === "yolo") cfg.tools = raw.tools;
   if (raw.autoMode === "auto" || raw.autoMode === "ask") cfg.autoMode = raw.autoMode;
   if (typeof raw.plan === "boolean") cfg.plan = raw.plan;
+  if (typeof raw.fx === "boolean") cfg.fx = raw.fx;
   if (raw.ignoreEnvKey === true) cfg.ignoreEnvKey = true;
   if (!cfg.apiKey) {
     const legacy = readJson(legacyAuthPath());

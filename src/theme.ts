@@ -39,3 +39,13 @@ export const theme = {
 
 /** Color names for Ink <Text color>; undefined when color is off. */
 export const inkColor = (hex: string) => (colorLevel === 0 ? undefined : hex);
+
+/* ─── fun effects (snow, sparkles, intro) — on-brand sky-blue + pale white ─── */
+export const FX_SNOW = ["❄", "❅", "❆", "•", "·", "*"];
+export const FX_SPARKLE = ["✦", "✧", "⋆", "✴", "✺"];
+/** Pale sky-blue flakes; falls back to plain text when color is off. */
+export const fxSnow = (s: string) => (colorLevel === 0 ? s : c.hex("#dbeafe")(s));
+/** Brand-blue sparkle accent. */
+export const fxSparkle = (s: string) => (colorLevel === 0 ? s : c.hex(BRAND_BLUE).bold(s));
+/** Soft slate for secondary intro text. */
+export const fxSlate = (s: string) => (colorLevel === 0 ? s : c.hex("#9fb3c8")(s));

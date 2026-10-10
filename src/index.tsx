@@ -2,6 +2,8 @@
 import React from "react";
 import { render } from "ink";
 import { App } from "./ui/App.js";
+import { playIntro } from "./ui/Intro.js";
+import { fxEnabled } from "./ui/fx.js";
 import { VERSION } from "./constants.js";
 import { configPath } from "./config.js";
 
@@ -33,6 +35,7 @@ Environment
   UNJAILED_HOME       config directory (default ~/.unjailed)
   UNJAILED_TIMEOUT    request timeout in seconds (default 30)
   UNJAILED_NO_HISTORY set to 1 to stop saving chats (disables /resume)
+  UNJAILED_NO_FX      set to 1 to turn off the fun effects (wink, snow)
   NO_COLOR            disable colors
 
 Config: ${configPath()}`);
@@ -63,6 +66,12 @@ if (unknown) {
   process.exit(1);
 }
 const startup = args.some((a) => a === "-c" || a === "--continue") ? "continue" : args.some((a) => a === "-r" || a === "--resume") ? "resume" : undefined;
+
+// A quick animated wink hello before the UI (skipped when effects are off).
+if (fxEnabled()) {
+  await playIntro();
+  process.stdout.write("\x1b[2J\x1b[3J\x1b[H"); // clear the intro so the app starts clean
+}
 
 const app = render(<App startup={startup} />, { exitOnCtrlC: false, kittyKeyboard: { mode: kitty ? "enabled" : "disabled" } });
 await app.waitUntilExit();
