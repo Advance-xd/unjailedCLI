@@ -12,7 +12,7 @@ import { DEFAULT_MODEL } from "../constants.js";
 import { renderMarkdown } from "../markdown.js";
 import { theme } from "../theme.js";
 import { Header } from "./Header.js";
-import { Snow, FinishFlourish } from "./Snow.js";
+import { FinishFlourish } from "./Snow.js";
 import { fxEnabled } from "./fx.js";
 import { onFirstLine, onLastLine, Prompt, type EditorState } from "./Prompt.js";
 import { SelectList } from "./SelectList.js";
@@ -1254,7 +1254,6 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         {(item) => <TranscriptItem key={item.id} item={item} width={width} />}
       </Static>
 
-      {fx && <Snow width={width} rows={size.rows} />}
       {fx && <FinishFlourish streaming={!!stream} />}
 
       {stream && (
