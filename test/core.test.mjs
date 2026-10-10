@@ -166,6 +166,8 @@ test("markdown strips leaked html tags but keeps generics/comparisons", () => {
   assert.doesNotMatch(out, /<div>|<\/div>|<br>/);
   assert.match(out, /List<int>/);
   assert.match(out, /1 < 2/);
+});
+
 const { trimHistory } = await import("../dist/api.js");
 
 test("trimHistory shrinks old context without deleting messages or breaking tool pairing", () => {
