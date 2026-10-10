@@ -14,6 +14,7 @@
 //   "longcode"   → an 80-line code block (tests the live-area height cap)
 //   "debug"      → reports the reasoning_effort and system prompt it received
 //   "mkfile"     → (agent tools on) calls write_file, then reports the tool result
+//   "slowfile"   → with mkfile: the write_file arguments stream in slowly
 
 import http from "node:http";
 
@@ -99,7 +100,7 @@ function toolPairingError(messages) {
 const sseChunk = (body, delta, finish = null) =>
   `data: ${JSON.stringify({ id: "mock", object: "chat.completion.chunk", model: body.model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
 
-async function streamToolCall(res, body, name, args) {
+async function streamToolCall(res, body, name, args, chunkDelay = 5) {
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
   const id = `call_${Math.random().toString(36).slice(2, 10)}`;
   const json = JSON.stringify(args);
@@ -107,7 +108,7 @@ async function streamToolCall(res, body, name, args) {
   // Arguments arrive in fragments, like real servers.
   for (let i = 0; i < json.length; i += 12) {
     res.write(sseChunk(body, { tool_calls: [{ index: 0, function: { arguments: json.slice(i, i + 12) } }] }));
-    await sleep(5);
+    await sleep(chunkDelay);
   }
   res.write(sseChunk(body, {}, "tool_calls"));
   res.write("data: [DONE]\n\n");
@@ -162,7 +163,8 @@ const server = http.createServer(async (req, res) => {
       }
       if (hasWrite) {
         log("→ tool_call write_file");
-        return streamToolCall(res, body, "write_file", { path: "mock-made.txt", content: "made by the mock\n" });
+        // "slowfile": arguments trickle in for ~3s, like a model writing a big file
+        return streamToolCall(res, body, "write_file", { path: "mock-made.txt", content: "made by the mock\n" }, lastUser.includes("slowfile") ? 400 : 5);
       }
     }
 

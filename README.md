@@ -148,7 +148,14 @@ choices to skip prompts; `/auto` cannot unlock capabilities in read/off mode.
 Plan mode (opt-in with `/plan`) requires an approved plan before tasks in
 cmds/yolo mode; if planning fails, execution stops.
 
-Foreground commands default to a 10-minute timeout; `timeout_ms` can shorten it.
+`glob` and `grep` run in a background thread, so a huge folder or a slow regex never
+freezes the terminal: they skip `node_modules`, dot-folders and Windows `AppData`/`Program Files`
+trees (search one directly to include it), stop after 100,000 files or 20 seconds,
+and return what they found so far. While the agent works, the status line always
+shows what it is doing: thinking, writing a reply, preparing a file, running a
+tool, waiting for your approval, or waiting on a server that has gone quiet.
+
+Foreground commands default to a 10-minute timeout; `timeout_ms` can shorten it. A command returns when it exits, even if a program it started (`start ...`) is still running.
 Cancellation and timeouts kill the command's process tree. Output retains a
 bounded tail plus the exit status. For a development server, use
 `background: true`; the returned `job_id` works with `process_status` and

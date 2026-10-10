@@ -123,3 +123,25 @@ test("declining an approval writes nothing", async (t) => {
   await s.waitFor(/Tool said: The user declined/);
   assert.equal(fs.existsSync(path.join(s.work, "mock-made.txt")), false);
 });
+
+test("the status line always says what the agent is doing", async (t) => {
+  const s = await setup(t, { tools: "cmds", plan: false });
+  await sleep(200);
+  await s.type("mkfile slowfile");
+  // while the model is still writing the file's contents into the tool call
+  await s.waitFor(/Preparing write_file · \d+ chars/);
+  // while the action waits for the user
+  await s.waitFor(/Waiting for your approval · \d+s · y = allow/);
+  await sleep(200);
+  s.app.stdin.write("y");
+  await s.waitFor(/Tool said: Wrote/);
+});
+
+test("a silent server is called out instead of looking frozen", async (t) => {
+  const s = await setup(t, { tools: "cmds", plan: false });
+  await sleep(200);
+  await s.type("hang");
+  await s.waitFor(/no data from the model for \d+s/, 15000);
+  s.app.stdin.write("\x03"); // Ctrl+C stops the request
+  await s.waitFor(/Stopped\./);
+});

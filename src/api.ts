@@ -143,6 +143,9 @@ export interface StreamHandlers {
   onReasoning?: (text: string) => void;
   /** Fired once per request when the server reports token usage. */
   onUsage?: (usage: Usage) => void;
+  /** Tool-call arguments streaming in (e.g. a whole file for write_file) —
+   *  can take minutes with no visible text, so the UI shows this as progress. */
+  onToolArgs?: (name: string, chars: number) => void;
 }
 
 /** A function call the model wants made. Arguments stream in as fragments. */
@@ -314,6 +317,8 @@ export async function streamChat(
             if (tc.function?.name) slot.name = tc.function.name;
             if (typeof tc.function?.arguments === "string") slot.args += tc.function.arguments;
           }
+          const latest = [...toolAccum.values()].reverse().find((t) => t.name);
+          if (latest) handlers.onToolArgs?.(latest.name!, [...toolAccum.values()].reduce((n, t) => n + t.args.length, 0));
         }
       }
     }

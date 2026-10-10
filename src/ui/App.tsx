@@ -272,6 +272,8 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
       if (!timer) timer = setTimeout(sync, 40);
     };
 
+    lastDataAt.current = Date.now();
+    toolArgs.current = null;
     setStream({ text: "", started: false, reasoning: false, flushed: false, reasoningChars: 0, reasoningTail: "" });
     let outcome: "done" | "stopped" | "error" = "done";
     let errMsg = "";
@@ -282,11 +284,13 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
       const baseMessages = withSystem(messages.current, useTools);
       const streamHandlers = {
         onToken: (t: string) => {
+          lastDataAt.current = Date.now();
           full += t;
           pending += t;
           schedule();
         },
         onReasoning: (t: string) => {
+          lastDataAt.current = Date.now();
           if (!reasoning) { reasoning = true; schedule(); }
           reasoningChars += t ? t.length : 0;
           if (t) reasoningTail = (reasoningTail + t).slice(-90);
@@ -297,6 +301,11 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
           // In agent mode onUsage fires each round; the latest request's prompt
           // count is the live context size (last round's completion for "out").
           setUsage({ ctx: u.prompt, prompt: u.prompt, completion: u.completion, approx: false });
+        },
+        onToolArgs: (name: string, chars: number) => {
+          lastDataAt.current = Date.now();
+          toolArgs.current = { name, chars };
+          schedule();
         },
       };
 
@@ -376,11 +385,14 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
           onToolCall: (name, args) => {
             let argsObj: Record<string, unknown> = {};
             try { argsObj = JSON.parse(args || "{}"); } catch { /* raw */ }
+            toolArgs.current = null;
             liveTool.current = { name, detail: toolDetail(name, argsObj), t0: Date.now() };
             push({ kind: "info", text: `⚙ ${name} ${clipArgs(args)}` });
           },
           onToolResult: (name, ok, output) => {
             liveTool.current = null;
+            lastDataAt.current = Date.now(); // the next request starts now
+            schedule();
             push({ kind: ok ? "info" : "error", text: ok ? `↳ ${clipResult(output)}` : `↳ failed: ${clipResult(output)}` });
           },
         }, ctrl.signal, {
@@ -562,6 +574,10 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
   const toolArmedAt = useRef(0);
   /** what the agent is doing right now, for the live status line */
   const liveTool = useRef<{ name: string; detail: string; t0: number } | null>(null);
+  /** a tool call the model is still writing (its arguments stream in) */
+  const toolArgs = useRef<{ name: string; chars: number } | null>(null);
+  /** last time the model sent anything — drives the "no data for Ns" warning */
+  const lastDataAt = useRef(0);
   const [confirmingCommand, setConfirmingCommand] = useState<string | null>(null);
 
   const clipArgs = (s: string) => (s.length > 80 ? s.slice(0, 80) + "…" : s);
@@ -572,6 +588,22 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     if (name === "read_file" || name === "list_dir" || name === "glob" || name === "grep") return "reading";
     if (name === "web_fetch" || name === "open_url") return "browsing";
     return "idle";
+  }
+  /** What the agent is doing right now — always shown while a reply is in
+   *  progress, so a working agent never looks like a frozen terminal. */
+  function activity(st: Stream): { key: string; kind: WorkKind; label?: string; detail?: string; waitingOnModel: boolean } | null {
+    if (planAnswerRef.current) return null; // the plan selector is on screen
+    if (confirmingCommand !== null) return { key: "approval", kind: "approval", waitingOnModel: false };
+    const tool = liveTool.current;
+    if (tool) return { key: `tool:${tool.t0}`, kind: toolWorkKind(tool.name), detail: tool.detail, waitingOnModel: false };
+    const args = toolArgs.current;
+    if (args) {
+      const kind = toolWorkKind(args.name);
+      return { key: `args:${args.name}`, kind: kind === "idle" ? "streaming" : kind, label: `Preparing ${args.name}`, detail: `${fmtTokens(args.chars)} chars`, waitingOnModel: true };
+    }
+    if (st.text.trim()) return { key: "streaming", kind: "streaming", waitingOnModel: true };
+    if (st.reasoning && !st.started) return { key: "reasoning", kind: "reasoning", waitingOnModel: true };
+    return { key: "idle", kind: "idle", label: st.started ? "Waiting for the model" : undefined, waitingOnModel: true };
   }
   function toolDetail(name: string, args: Record<string, unknown>): string {
     const a = String(args.path ?? args.command ?? args.url ?? args.pattern ?? "");
@@ -1282,14 +1314,14 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
           {stream.text.trim() ? (
             <AssistantText text={stream.text} first={!stream.flushed} maxLines={Math.max(4, size.rows - 10)} width={width} />
           ) : null}
-          {!stream.started && !liveTool.current && <Spinner kind={stream.reasoning ? "reasoning" : "idle"} />}
-          {stream.reasoning && !stream.started && !liveTool.current && (
+          {stream.reasoning && !stream.started && !liveTool.current && !toolArgs.current && (
             <Text>{theme.dim(`  thinking… ${stream.reasoningChars.toLocaleString()} chars · ${stream.reasoningTail.slice(-70).replace(/\s+/g, " ").trim()}`)}</Text>
           )}
-          {liveTool.current && (
-            <Spinner kind={toolWorkKind(liveTool.current.name)} detail={liveTool.current.detail} />
-          )}
-          {stream.started && !stream.text.trim() && !liveTool.current && <Text>{theme.dim("  …")}</Text>}
+          {(() => {
+            // one status line, always present while the agent works
+            const st = activity(stream);
+            return st ? <Spinner key={st.key} kind={st.kind} label={st.label} detail={st.detail} quietSince={st.waitingOnModel ? lastDataAt.current : undefined} /> : null;
+          })()}
         </Box>
       )}
 
