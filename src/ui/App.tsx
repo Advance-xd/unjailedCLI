@@ -132,6 +132,11 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
   const abortRef = useRef<AbortController | null>(null);
   const exitArmed = useRef(false);
   const flashTimer = useRef<NodeJS.Timeout | undefined>(undefined);
+  // Prompts typed while a reply is streaming wait here and run in order.
+  const queueRef = useRef<string[]>([]);
+  const [queueLen, setQueueLen] = useState(0);
+  // Esc is two-stage while working: first press arms, second actually stops/skips.
+  const escArmed = useRef(false);
 
   const push = useCallback((...newItems: NewItem[]) => {
     setItems((prev) => [...prev, ...newItems.map((it) => ({ ...it, id: id() }) as Item)]);
@@ -140,12 +145,21 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
   const success = (text: string) => push({ kind: "success", text });
   const error = (text: string) => push({ kind: "error", text });
 
+  // Put a prompt on the queue to run after the current reply finishes.
+  const enqueue = (text: string) => {
+    queueRef.current.push(text);
+    setQueueLen(queueRef.current.length);
+    const preview = text.length > 56 ? text.slice(0, 56) + "…" : text;
+    push({ kind: "info", text: `⏳ Queued (${queueRef.current.length}) · ${preview}` });
+  };
+
   const showFlash = (text: string, ms = 2000) => {
     setFlash(text);
     clearTimeout(flashTimer.current);
     flashTimer.current = setTimeout(() => {
       setFlash(null);
       exitArmed.current = false;
+      escArmed.current = false;
     }, ms);
   };
 
@@ -279,7 +293,24 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
       };
 
       if (!useTools) {
-        await streamChat(baseUrl, auth.key, model, baseMessages, streamHandlers, ctrl.signal, { effort: autoEffortFor(text) });
+        // Plain chat: if the model spends its whole token budget on hidden
+        // reasoning and finishes with finish_reason=length but no visible text,
+        // nudge it to answer and resume (up to 2×) — the same recovery the agent
+        // loop already does, so "thinking → empty reply" is fixed here too.
+        const msgs: ChatMessage[] = [...baseMessages];
+        let resumes = 0;
+        for (;;) {
+          const before = full.length;
+          const res = await streamChat(baseUrl, auth.key, model, msgs, streamHandlers, ctrl.signal, { effort: autoEffortFor(text) });
+          const producedNothing = full.length === before;
+          if (res?.finishReason === "length" && producedNothing && resumes < 2) {
+            resumes++;
+            push({ kind: "info", text: "Model spent its budget thinking — nudging it to answer…" });
+            msgs.push({ role: "user", content: "Continue now. Skip any further deliberation and give the answer directly." });
+            continue;
+          }
+          break;
+        }
       } else {
         // agent loop: definitions + executor; run_command asks unless yolo/auto
         const defs = toolDefinitions(toolsMode);
@@ -900,13 +931,14 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
   const submitChat = (value: string) => {
     const text = value.replace(/\s+$/, "");
     if (!text.trim()) return;
-    if (stream || busy) {
-      showFlash("Still working — Esc or Ctrl+C to stop it first");
-      return;
-    }
     setHistory((h) => (h[h.length - 1] === text ? h : [...h, text]));
     setHistIdx(null);
     setEditor(EMPTY);
+    // Busy? Don't reject it — queue it and run it when the current reply finishes.
+    if (stream || busy) {
+      enqueue(text);
+      return;
+    }
     if (text.startsWith("/")) void runCommand(text);
     else void sendChat(text);
   };
@@ -999,7 +1031,18 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
       return;
     }
     if (key.escape && abortRef.current && (stream || busy)) {
-      abortRef.current.abort();
+      // Two-stage: first Esc arms, second Esc actually stops the running prompt
+      // (and the queue drains the next one). Prevents a stray Esc from killing a
+      // long reply by accident.
+      if (escArmed.current) {
+        escArmed.current = false;
+        setFlash(null);
+        abortRef.current.abort();
+        return;
+      }
+      escArmed.current = true;
+      const waiting = queueRef.current.length;
+      showFlash(waiting ? `Press Esc again to skip to the next queued prompt (${waiting} waiting)` : "Press Esc again to stop");
       return;
     }
     if (key.ctrl && input === "c") {
@@ -1109,10 +1152,23 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     { isActive: mode.type === "picker" },
   );
 
+  // Drain the queue: whenever nothing is streaming or working, start the next
+  // queued prompt. `idle` only flips (not re-evaluates per token), so this fires
+  // once per turn boundary, never mid-stream.
+  const idle = !stream && !busy && mode.type === "chat";
+  useEffect(() => {
+    if (!idle || queueRef.current.length === 0) return;
+    const next = queueRef.current.shift()!;
+    setQueueLen(queueRef.current.length);
+    if (next.startsWith("/")) void runCommand(next);
+    else void sendChat(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idle]);
+
   // ---------- render ----------
 
   const width = size.columns;
-  // You can keep typing while a reply streams; Enter waits until it's done.
+  // You can keep typing while a reply streams; Enter queues it for when this one finishes.
   const promptActive = mode.type === "chat" && confirmingCommand === null && planAnswerRef.current === null;
 
   if (exiting) {
@@ -1242,12 +1298,13 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
                 exitArmed.current = false;
                 setFlash(null);
               }
+              escArmed.current = false;
             }}
             onSubmit={mode.type === "login" ? (v) => void submitLogin(v) : submitChat}
             onSpecialKey={onSpecialKey}
             mask={mode.type === "login"}
             label={mode.type === "login" ? "Paste your API key: " : "› "}
-            placeholder={mode.type === "login" ? "" : stream ? "" : 'Message Unjailed, or type "/" for commands'}
+            placeholder={mode.type === "login" ? "" : stream ? "Type to queue the next prompt · Esc Esc to skip" : 'Message Unjailed, or type "/" for commands'}
             isActive={promptActive}
           />
           <Text>{theme.dim("─".repeat(Math.max(10, width - 1)))}</Text>
@@ -1268,7 +1325,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         </Box>
       )}
 
-      <StatusLine width={width} model={model} effort={effort} skills={activeSkills.length} toolsMode={toolsMode} autoMode={autoMode} planMode={planMode} loggedIn={!!auth.key} keyMasked={maskKey(auth.key)} flash={flash} streaming={!!stream} />
+      <StatusLine width={width} model={model} effort={effort} skills={activeSkills.length} toolsMode={toolsMode} autoMode={autoMode} planMode={planMode} loggedIn={!!auth.key} keyMasked={maskKey(auth.key)} flash={flash} streaming={!!stream} queued={queueLen} />
     </>
   );
 }
@@ -1294,10 +1351,10 @@ const EFFORT_HINTS: Record<Effort, string> = {
   high: "thinks longest — slower, uses more tokens",
 };
 
-function StatusLine({ width, model, effort, skills, toolsMode, autoMode, planMode, loggedIn, keyMasked, flash, streaming }: { width: number; model: string; effort: Effort; skills: number; toolsMode: "off" | "read" | "cmds" | "yolo"; autoMode: "ask" | "auto"; planMode: "off" | "on"; loggedIn: boolean; keyMasked: string; flash: string | null; streaming: boolean }) {
-  const extras = `${effort !== "auto" ? theme.dim(` · effort ${effort}`) : ""}${skills ? theme.dim(` · ${skills} skill${skills === 1 ? "" : "s"}`) : ""}${toolsMode !== "off" ? theme.dim(` · tools ${toolsMode}`) : ""}${autoMode === "auto" ? theme.warn(" · auto") : ""}${planMode === "on" ? theme.dim(" · plan") : ""}`;
+function StatusLine({ width, model, effort, skills, toolsMode, autoMode, planMode, loggedIn, keyMasked, flash, streaming, queued }: { width: number; model: string; effort: Effort; skills: number; toolsMode: "off" | "read" | "cmds" | "yolo"; autoMode: "ask" | "auto"; planMode: "off" | "on"; loggedIn: boolean; keyMasked: string; flash: string | null; streaming: boolean; queued: number }) {
+  const extras = `${effort !== "auto" ? theme.dim(` · effort ${effort}`) : ""}${skills ? theme.dim(` · ${skills} skill${skills === 1 ? "" : "s"}`) : ""}${toolsMode !== "off" ? theme.dim(` · tools ${toolsMode}`) : ""}${autoMode === "auto" ? theme.warn(" · auto") : ""}${planMode === "on" ? theme.dim(" · plan") : ""}${queued ? theme.warn(` · ${queued} queued`) : ""}`;
   const left = `${theme.brand("◆")} ${model}${extras}  ${theme.dim("·")}  ${loggedIn ? theme.ok("● Logged in") + theme.dim(` ${keyMasked}`) : theme.warn("○ Not logged in") + theme.dim(" — type /login")}`;
-  const right = flash ? theme.warn(flash) : width < 72 ? "" : theme.dim(streaming ? "Esc to stop" : "/ for commands");
+  const right = flash ? theme.warn(flash) : width < 72 ? "" : theme.dim(streaming ? "Esc Esc to skip" : "/ for commands");
   return (
     <Box justifyContent="space-between" paddingX={1}>
       <Text wrap="truncate-end">{left}</Text>
@@ -1394,7 +1451,7 @@ function helpText(): string {
     ["Shift+Enter or \\ then Enter", "New line (Alt+Enter / Ctrl+J also work)"],
     ["↑ / ↓", "Previous / next input"],
     ["Space", "Toggle a skill in /skills"],
-    ["Esc", "Stop the response · close menus"],
+    ["Esc", "Close menus · while working, press twice to stop / skip to next queued"],
     ["Ctrl+C", "Stop the response · clear input · press twice to exit"],
     ["Ctrl+D", "Exit"],
   ];
