@@ -331,16 +331,20 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         // ── context diet: shrink OLD tool results before each turn ──
         // The loop resends the whole history every round; by round 8 that's
         // tens of thousands of tokens of stale output that cost time AND money.
-        // Keep the newest result full; older ones compress to head+tail.
+        // Tiered by age (newest→oldest), shrinking content only so tool_call/
+        // tool_result pairing is never broken: newest 2 stay full, the next few
+        // keep a head+tail, and anything older collapses to a one-line stub.
         const dietHistory = (h: AgentMessage[]): AgentMessage[] => {
           let toolSeenFromEnd = 0;
           for (let i = h.length - 1; i >= 0; i--) {
             const m = h[i]!;
-            if (m.role !== "tool") continue;
+            if (m.role !== "tool" || typeof m.content !== "string") continue;
             toolSeenFromEnd++;
-            if (toolSeenFromEnd <= 2) continue; // newest two stay full
-            if (m.content.length > 800) {
-              (m as { content: string }).content = m.content.slice(0, 400) + "\n…(trimmed)\n" + m.content.slice(-300);
+            if (toolSeenFromEnd <= 2) continue; // newest two: full
+            if (toolSeenFromEnd <= 5) {         // middle: head + tail
+              if (m.content.length > 500) (m as { content: string }).content = m.content.slice(0, 250) + "\n…(trimmed)\n" + m.content.slice(-150);
+            } else {                            // oldest: stub
+              if (m.content.length > 120) (m as { content: string }).content = m.content.slice(0, 80) + " …[old tool result trimmed]";
             }
           }
           return h;

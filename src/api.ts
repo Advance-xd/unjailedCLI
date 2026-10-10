@@ -370,24 +370,52 @@ export async function agentTurn(
 }
 
 
-/** Keep the request payload inside upstream limits:
+/** Keep the request payload lean and inside upstream limits:
  *  - no single message over 28k chars (upstream rejects >32k strings)
- *  - whole history under ~400k chars (~100k tokens) by dropping oldest turns
- *    from the middle (system/user-first and the newest turns survive). */
+ *  - whole history under ~260k chars (~65k tokens) by SHRINKING old content,
+ *    never deleting messages — so every assistant tool_calls message keeps its
+ *    paired tool result (dropping one would orphan the other and some servers
+ *    400 on that). The system message (index 0) and the most recent turns are
+ *    left intact; only old context is compressed. */
 const MAX_MSG_CHARS = 28_000;
-const MAX_HISTORY_CHARS = 400_000;
-function trimHistory(history: AgentMessage[]): void {
+const MAX_HISTORY_CHARS = 260_000;
+
+/** Approx wire size of a message (content + any tool_calls payload). */
+function msgSize(m: AgentMessage): number {
+  let n = typeof m.content === "string" ? m.content.length : 0;
+  if (m.role === "assistant" && m.tool_calls) n += JSON.stringify(m.tool_calls).length;
+  return n + 4;
+}
+
+export function trimHistory(history: AgentMessage[]): void {
+  // 1) hard per-message cap (protects against a single giant message).
   for (const m of history) {
     if (typeof m.content === "string" && m.content.length > MAX_MSG_CHARS) {
       (m as { content: string }).content = m.content.slice(0, MAX_MSG_CHARS - 30) + "\n…(trimmed)";
     }
   }
-  let total = history.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : 200), 0);
-  while (total > MAX_HISTORY_CHARS && history.length > 6) {
-    // drop the oldest non-first, non-last-two message (keep original user ask + recent context)
-    const idx = history.findIndex((m, i) => i > 0 && i < history.length - 2 && m.role === "tool");
-    const drop = idx >= 0 ? idx : 1;
-    total -= typeof history[drop]!.content === "string" ? (history[drop]!.content as string).length : 200;
-    history.splice(drop, 1);
+  const total = () => history.reduce((n, m) => n + msgSize(m), 0);
+  if (total() <= MAX_HISTORY_CHARS) return;
+
+  // 2) stub OLD tool-result bodies first — they dominate the payload. Keep the
+  //    message itself (pairing stays valid), just drop the bulky body. The
+  //    newest two tool results are left whole; the model usually needs them.
+  const toolIdx = history.map((m, i) => (m.role === "tool" ? i : -1)).filter((i) => i >= 0);
+  for (const i of toolIdx.slice(0, Math.max(0, toolIdx.length - 2))) {
+    if (total() <= MAX_HISTORY_CHARS) break;
+    const m = history[i]!;
+    if (typeof m.content === "string" && m.content.length > 100) {
+      (m as { content: string }).content = m.content.slice(0, 80) + " …[old tool result trimmed]";
+    }
+  }
+
+  // 3) still over budget? compress old assistant/user prose (oldest first),
+  //    always keeping the system message (0) and the last 4 messages untouched.
+  for (let i = 1; i < history.length - 4 && total() > MAX_HISTORY_CHARS; i++) {
+    const m = history[i]!;
+    if (m.role === "tool") continue; // already handled above
+    if (typeof m.content === "string" && m.content.length > 600) {
+      (m as { content: string }).content = m.content.slice(0, 300) + "\n…[earlier context trimmed]\n" + m.content.slice(-200);
+    }
   }
 }
