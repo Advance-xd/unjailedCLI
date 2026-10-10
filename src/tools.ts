@@ -114,35 +114,6 @@ export function toolDefinitions(mode: Exclude<ToolsMode, "off">): ToolDef[] {
           },
         },
       },
-      {
-        type: "function",
-        function: {
-          name: "move_file",
-          description: "Move or rename a file/folder. Accepts Desktop/Documents/Downloads shortcuts and ~ paths. Destination parent folders are created.",
-          parameters: {
-            type: "object",
-            properties: {
-              from: { type: "string", description: "Source path" },
-              to: { type: "string", description: "Destination path" },
-            },
-            required: ["from", "to"],
-          },
-        },
-      },
-      {
-        type: "function",
-        function: {
-          name: "delete_file",
-          description: "Delete a file or folder — to the OS trash/recycle bin when the platform allows, permanent only as fallback. Requires cmds/yolo mode.",
-          parameters: {
-            type: "object",
-            properties: {
-              path: { type: "string", description: "File or folder to delete" },
-            },
-            required: ["path"],
-          },
-        },
-      },
     {
       type: "function",
       function: {
@@ -200,6 +171,35 @@ export function toolDefinitions(mode: Exclude<ToolsMode, "off">): ToolDef[] {
               replace_all: { type: "boolean", description: "Replace every occurrence (default false)" },
             },
             required: ["path", "old_text", "new_text"],
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "move_file",
+          description: "Move or rename a file/folder. Accepts Desktop/Documents/Downloads shortcuts and ~ paths. Destination parent folders are created.",
+          parameters: {
+            type: "object",
+            properties: {
+              from: { type: "string", description: "Source path" },
+              to: { type: "string", description: "Destination path" },
+            },
+            required: ["from", "to"],
+          },
+        },
+      },
+            {
+        type: "function",
+        function: {
+          name: "delete_file",
+          description: "Delete a file or folder — to the OS trash/recycle bin when the platform allows, permanent only as fallback. Requires cmds/yolo mode.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "File or folder to delete" },
+            },
+            required: ["path"],
           },
         },
       },

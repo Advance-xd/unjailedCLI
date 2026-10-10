@@ -15,8 +15,8 @@ test("tool definitions by mode", () => {
   const cmds = toolDefinitions("cmds");
   const yolo = toolDefinitions("yolo");
   const names = (d) => d.map((t) => t.function.name);
-  assert.deepEqual(names(read), ["read_file", "list_dir", "glob", "grep", "open_url", "web_fetch"]);
-  assert.deepEqual(names(cmds), [...names(read), "write_file", "edit_file", "run_command"]);
+  assert.deepEqual(names(read), ["read_file", "list_dir", "glob", "grep", "clipboard", "launch_app", "open_url", "web_fetch"]);
+  assert.deepEqual(names(cmds), ["read_file", "list_dir", "glob", "grep", "clipboard", "launch_app", "open_url", "web_fetch", "write_file", "edit_file", "move_file", "delete_file", "run_command"]);
   assert.equal(cmds.length, yolo.length);
 });
 
