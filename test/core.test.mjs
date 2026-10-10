@@ -141,3 +141,30 @@ test("environment block names this OS and never crashes", () => {
   assert.match(env, expected);
   assert.match(env, /Working directory: \/tmp\/x/);
 });
+
+const { trimHistory } = await import("../dist/api.js");
+
+test("trimHistory shrinks old context without deleting messages or breaking tool pairing", () => {
+  const h = [{ role: "system", content: "SYS ".repeat(100) }, { role: "user", content: "do the thing" }];
+  for (let r = 0; r < 25; r++) {
+    h.push({ role: "assistant", content: `r${r}`, tool_calls: [{ id: `c${r}`, type: "function", function: { name: "read_file", arguments: "{}" } }] });
+    h.push({ role: "tool", tool_call_id: `c${r}`, content: "y".repeat(16000) });
+  }
+  h.push({ role: "user", content: "finish now" });
+
+  const callIds = h.filter((m) => m.tool_calls).flatMap((m) => m.tool_calls.map((t) => t.id));
+  const beforeLen = h.length;
+  const beforeChars = h.reduce((n, m) => n + (m.content?.length ?? 0), 0);
+
+  trimHistory(h);
+
+  const afterChars = h.reduce((n, m) => n + (m.content?.length ?? 0), 0);
+  const toolIds = new Set(h.filter((m) => m.role === "tool").map((m) => m.tool_call_id));
+
+  assert.equal(h.length, beforeLen, "no messages deleted (pairing preserved)");
+  assert.ok(callIds.every((id) => toolIds.has(id)), "every tool_call still has its tool result");
+  assert.ok(afterChars < beforeChars, "history got smaller");
+  assert.ok(afterChars <= 260_000, "under the budget");
+  assert.ok(h[0].role === "system" && h[0].content.startsWith("SYS "), "system message intact");
+  assert.equal(h[h.length - 1].content, "finish now", "most recent user turn intact");
+});

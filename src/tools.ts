@@ -176,6 +176,13 @@ function clip(s: string, max = MAX_RUN_OUTPUT): string {
   return s.length > m ? s.slice(0, m) + `\n…(truncated at ${m} chars)` : s;
 }
 
+/** Drop wasted tokens from command output: trailing whitespace per line and
+ *  long blank runs. Used only for run_command (NOT read_file — collapsing a
+ *  source file's blank lines would break edit_file's exact-match). */
+function squeeze(s: string): string {
+  return s.replace(/[ \t]+$/gm, "").replace(/\n{4,}/g, "\n\n\n");
+}
+
 /* ───────────── glob: tiny recursive matcher, no deps ───────────── */
 
 function globToRe(glob: string): RegExp {
@@ -446,14 +453,14 @@ export async function executeTool(
         const done = (r: ToolResult) => { if (!settled) { settled = true; resolve(r); } };
         const timer = setTimeout(() => {
           child.kill("SIGKILL");
-          done({ ok: false, output: clip(out) + `\n…timed out after ${RUN_TIMEOUT_MS / 60000} min (killed). For servers/daemons pass background:true.` });
+          done({ ok: false, output: clip(squeeze(out)) + `\n…timed out after ${RUN_TIMEOUT_MS / 60000} min (killed). For servers/daemons pass background:true.` });
         }, RUN_TIMEOUT_MS);
         child.stdout.on("data", (d) => { out += d.toString(); });
         child.stderr.on("data", (d) => { out += d.toString(); });
         child.on("error", (e) => { clearTimeout(timer); done({ ok: false, output: `Failed to start: ${e.message}` }); });
         child.on("close", (code) => {
           clearTimeout(timer);
-          done({ ok: code === 0, output: clip(out) || `(no output, exit ${code})` });
+          done({ ok: code === 0, output: clip(squeeze(out)) || `(no output, exit ${code})` });
         });
       });
     }
