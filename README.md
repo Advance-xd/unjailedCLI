@@ -2,7 +2,7 @@
 
 <h1 align="center">Unjailed CLI</h1>
 
-<p align="center">Chat with <a href="https://unjailedai.com">Unjailed AI</a> from your terminal. It streams responses, renders markdown, and sends no telemetry.</p>
+<p align="center">Chat with <a href="https://unjailedai.com">Unjailed AI</a> from your terminal. It streams responses, renders markdown in clean boxes, runs an agent toolkit, tracks your token usage, and sends no telemetry.</p>
 
 ## Install
 
@@ -52,6 +52,8 @@ Type `/` to open the command menu. Use ↑/↓ to move, Enter or Tab to select, 
 | `/skills` | Switch skills on or off for this chat (Space toggles). `/skills <name>` toggles one; `/skills new <name>` creates one. |
 | `/tools` | Agent tools. No argument: the model can read files and list directories. `cmds` adds run_command (it asks before each run), `yolo` skips asking, `off` disables. |
 | `/api` | Show the base URL, masked key and current model, and run a live connection check. |
+| `/context` | Show token usage for this chat: current context size, the last turn's prompt/completion tokens, message count and model. Numbers come from the API (or a `~` estimate if the server sends none). The context size also shows live in the status line as `ctx 12.4k`. |
+| `/fun` | Toggle the fun effects — the startup wink, side snow and finish sparkle. `/fun off` turns them off; the choice is saved. Effects are off automatically when output is piped, `NO_COLOR` is set, or the terminal is small. |
 | `/update` | Update the CLI to the latest version from npm. |
 | `/auto` (`/bypass`) | Auto-approve tool calls — the agent stops asking and just works. `/auto off` restores confirmations. |
 | `/plan` | Plan mode: before writing files or running commands, the agent shows a numbered plan — Enter approves, Esc rejects. `/plan off` disables. |
@@ -60,6 +62,14 @@ Type `/` to open the command menu. Use ↑/↓ to move, Enter or Tab to select, 
 | `/clear` | Start a new chat and clear the screen. The previous chat stays saved. |
 | `/help` | List commands and keyboard shortcuts. |
 | `/exit` | Quit. Ctrl+C twice or Ctrl+D also works. |
+
+### Updating
+
+`/update` pulls the newest version from npm. If your `/update` seems stuck on an old version, you're on a build from before this was fixed — update once by hand and it'll work normally after that:
+
+```sh
+npm install -g unjailed@latest
+```
 
 ## Sessions
 
@@ -116,7 +126,7 @@ The toolkit:
 | `web_fetch` | Fetch a page/API and read it as text |
 | `write_file` | Create or overwrite a file (cmds/yolo) |
 | `edit_file` | Exact string replace in a file (cmds/yolo) |
-| `run_command` | Shell with a 2-minute timeout (cmds/yolo) |
+| `run_command` | Shell with a 10-minute timeout (cmds/yolo) |
 
 Commands run through `cmd /c` on Windows and `/bin/sh -c` elsewhere, with a
 10-minute timeout (long enough for downloads, builds and server installs) and a
@@ -128,11 +138,11 @@ shown in the status line.
 
 | Key | Action |
 |---|---|
-| Enter | Send |
+| Enter | Send. If a reply is already streaming, your message is **queued** and runs as soon as the current one finishes (the status line shows how many are waiting). |
 | Shift+Enter, or `\` then Enter | New line. Alt+Enter and Ctrl+J also work, for terminals that don't report Shift+Enter. |
 | ↑ / ↓ | Step through your previous inputs |
 | Paste | Multi-line pastes stay in the input box; they're never sent until you press Enter |
-| Esc | Stop the response; close menus |
+| Esc | Close menus. While a reply is running, press Esc **twice** to stop it and move on to the next queued prompt (the first press arms it, so a stray Esc won't kill a long reply). |
 | Ctrl+C | Stops the response while one is streaming. Otherwise clears the input; press it twice to exit. |
 | Ctrl+D | Exit |
 
@@ -144,9 +154,10 @@ shown in the status line.
 | `UNJAILED_BASE_URL` | API base URL (default `https://unjailedai.com/v1`) |
 | `UNJAILED_MODEL` | Model to start with |
 | `UNJAILED_HOME` | Config directory (default `~/.unjailed`) |
-| `UNJAILED_TIMEOUT` | Request timeout in seconds (default 30) |
+| `UNJAILED_TIMEOUT` | Request/stream timeout in seconds (default 120 — reasoning models can think for a while before the first token) |
 | `UNJAILED_NO_HISTORY` | Set to `1` to stop saving chats (disables `/resume`) |
-| `NO_COLOR` | Turn off colors |
+| `UNJAILED_NO_FX` | Set to `1` to turn off the fun effects (wink, snow, sparkle) |
+| `NO_COLOR` | Turn off colors (also turns off the fun effects) |
 
 ## Config location
 
@@ -155,7 +166,7 @@ shown in the status line.
 | macOS / Linux | `~/.unjailed/config.json` (permissions `600`) |
 | Windows | `%USERPROFILE%\.unjailed\config.json` |
 
-The file holds `apiKey`, `model`, an optional `baseUrl` and an optional `saveSessions`. Saved chats live next to it in `sessions/`. Delete it to reset everything. The CLI never prints your full key; it shows the key masked, for example `sk-…a1b2`.
+The file holds `apiKey`, `model`, an optional `baseUrl`, `saveSessions`, and `fx` (set `"fx": false` to disable the fun effects). Saved chats live next to it in `sessions/`. Delete it to reset everything. The CLI never prints your full key; it shows the key masked, for example `sk-…a1b2`.
 
 ## Privacy
 
@@ -171,7 +182,7 @@ UNJAILED_BASE_URL=http://localhost:8787/v1 UNJAILED_HOME=./.dev node dist/index.
 npm test          # unit + integration tests against the mock
 ```
 
-Put `ratelimit`, `servererror`, `credit`, `slow`, `hang`, `reason`, `markdown` or `longcode` in a chat message to make the mock server return that behavior.
+Put `ratelimit`, `servererror`, `credit`, `slow`, `hang`, `reason`, `markdown`, `longcode` or `usage` in a chat message to make the mock server return that behavior.
 
 The default API URL is set in `src/constants.ts` (`DEFAULT_BASE_URL`).
 
