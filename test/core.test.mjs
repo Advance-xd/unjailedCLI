@@ -141,3 +141,29 @@ test("environment block names this OS and never crashes", () => {
   assert.match(env, expected);
   assert.match(env, /Working directory: \/tmp\/x/);
 });
+
+// ── markdown: boxed code blocks + html normalisation (renderMarkdown already imported above) ──
+test("markdown draws a bordered box around fenced code with a language label", () => {
+  const out = renderMarkdown("```js\nconst a = 1;\n```", { width: 50 });
+  const lines = out.split("\n");
+  assert.match(lines[0], /^╭─ js ─+╮$/);                 // header bar names the language
+  assert.match(lines[lines.length - 1], /^╰─+╯$/);        // closed bottom border
+  assert.ok(lines.some((l) => /^│ .*const a = 1;.* │$/.test(l)), "code sits inside the box");
+  // every box line is the same visible width → right border lines up
+  const widths = new Set(lines.map((l) => l.length));
+  assert.equal(widths.size, 1);
+});
+
+test("markdown boxes a partial (unclosed) fence without throwing", () => {
+  let out;
+  assert.doesNotThrow(() => { out = renderMarkdown("```python\nprint(1)", { width: 40 }); });
+  assert.match(out, /^╭─ python/);
+  assert.match(out, /print\(1\)/);
+});
+
+test("markdown strips leaked html tags but keeps generics/comparisons", () => {
+  const out = renderMarkdown("a <div>x</div> <br> and List<int> with 1 < 2");
+  assert.doesNotMatch(out, /<div>|<\/div>|<br>/);
+  assert.match(out, /List<int>/);
+  assert.match(out, /1 < 2/);
+});

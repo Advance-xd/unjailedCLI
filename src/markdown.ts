@@ -3,37 +3,59 @@ import { c, colorLevel } from "./theme.js";
 import { BRAND_BLUE } from "./constants.js";
 import stringWidth from "string-width";
 
+const RESET = colorLevel > 0 ? "\x1b[0m" : "";
+
+// A conservative allow-list of HTML tags some models leak into markdown. We only
+// strip these exact tags (not every `<...>`), so things like `List<int>` or
+// `a < b` survive untouched.
+const HTML_TAG = /<\/?(?:br|p|div|span|strong|em|b|i|u|s|code|pre|ul|ol|li|dl|dt|dd|h[1-6]|blockquote|hr|table|thead|tbody|tfoot|tr|td|th|a|img|figure|figcaption|small|sub|sup)(?:\s[^>]*)?\s*\/?>/gi;
+
 /** Bold, italics, inline code and links within a single line. */
 function inline(text: string): string {
-  // Pull inline code out first so its contents aren't formatted.
+  // Pull inline code out first so its contents aren't formatted or HTML-stripped.
   const codes: string[] = [];
   let s = text.replace(/`([^`\n]+)`/g, (_, code: string) => {
     codes.push(code);
     return `\u0000${codes.length - 1}\u0000`;
   });
+  s = s.replace(HTML_TAG, ""); // drop leaked html outside code spans
   s = s.replace(/\*\*([^*\n]+?)\*\*/g, (_, t: string) => c.bold(t));
   s = s.replace(/__([^_\n]+?)__/g, (_, t: string) => c.bold(t));
   s = s.replace(/(^|[^*\w])\*([^*\n]+?)\*(?!\*)/g, (_, pre: string, t: string) => pre + c.italic(t));
   s = s.replace(/~~([^~\n]+?)~~/g, (_, t: string) => c.strikethrough(t));
   s = s.replace(/\[([^\]\n]+)\]\((https?:[^)\s]+)\)/g, (_, label: string, url: string) => `${c.hex(BRAND_BLUE).underline(label)} ${c.gray(`(${url})`)}`);
+  // inline code renders as a subtle chip; stays verbatim in no-color mode
   s = s.replace(/\u0000(\d+)\u0000/g, (_, i: string) => (colorLevel === 0 ? `\`${codes[+i]}\`` : c.hex(BRAND_BLUE)(codes[+i]!)));
   return s;
 }
 
-function codeBlock(code: string, lang: string): string[] {
-  let body = code;
+/** A fenced code block drawn as a rounded box with a dim language label.
+ *  `boxW` is the total visible width of the box (borders included); long code
+ *  lines are wrapped to the inner width so the right border never blows out. */
+function codeBlock(code: string, lang: string, boxW: number): string[] {
+  let body = code.replace(/\n+$/, "");
   if (colorLevel > 0) {
     try {
       const language = lang && supportsLanguage(lang) ? lang : undefined;
-      body = highlight(code, { language, ignoreIllegals: true });
+      body = highlight(body, { language, ignoreIllegals: true });
     } catch {
       /* leave plain */
     }
   }
-  const bar = c.gray("│ ");
-  const lines = body.split("\n").map((l) => bar + l);
-  const label = lang ? c.gray(`╭─ ${lang}`) : c.gray("╭─");
-  return [label, ...lines, c.gray("╰─")];
+  const h = (s: string) => c.gray(s);
+  const inner = Math.max(8, boxW - 4); // between "│ " (2) and " │" (2)
+  const open = lang ? `╭─ ${lang} ` : "╭─ ";
+  const fill = Math.max(2, boxW - stringWidth(open) - 1);
+  const rows: string[] = [h(open + "─".repeat(fill) + "╮")];
+  for (const raw of body.split("\n")) {
+    const pieces = stringWidth(raw) > inner ? wrapAnsiLine(raw, inner + 1) : [raw];
+    for (const piece of pieces) {
+      const pad = " ".repeat(Math.max(0, inner - stringWidth(piece)));
+      rows.push(h("│ ") + piece + RESET + pad + h(" │"));
+    }
+  }
+  rows.push(h("╰" + "─".repeat(Math.max(2, boxW - 2)) + "╯"));
+  return rows;
 }
 
 const splitRow = (line: string) =>
@@ -62,10 +84,6 @@ function table(rows: string[][], aligns: ("left" | "right" | "center")[]): strin
   return out;
 }
 
-/**
- * Render markdown to ANSI text. Safe to call on partial (still-streaming) input:
- * an unterminated code fence renders as a code block so far.
- */
 /** Wrap a single rendered line to `cols` visible columns, ANSI-aware.
  *  Long unbroken lines (urls, paths, minified code) otherwise clip hard at
  *  the terminal edge on narrow windows consoles. */
@@ -92,10 +110,19 @@ function wrapAnsiLine(line: string, cols: number): string[] {
   return parts;
 }
 
+/**
+ * Render markdown to ANSI text. Safe to call on partial (still-streaming) input:
+ * an unterminated code fence renders as the code block so far, a half-written
+ * table or dangling emphasis just renders as text. Never throws.
+ */
 export function renderMarkdown(src: string, opts: { width?: number } = {}): string {
-  const lines0 = src.replace(/\r\n?/g, "\n").split("\n");
-  // width-wrapping happens post-render (see below) — fences stay unwrapped
-  const lines = lines0;
+  // Width is known while streaming; for the settled transcript it isn't passed,
+  // so fall back to the live terminal width. Boxes are sized to fit inside it
+  // (and capped) so Ink never has to wrap — and corrupt — a bordered line.
+  const effWidth = opts.width ?? (process.stdout.columns || 80);
+  const boxW = Math.max(24, Math.min(effWidth - 3, 120));
+
+  const lines = src.replace(/\r\n?/g, "\n").split("\n");
   const out: string[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
@@ -107,7 +134,7 @@ export function renderMarkdown(src: string, opts: { width?: number } = {}): stri
       const body: string[] = [];
       i++;
       while (i < lines.length && !lines[i]!.trim().startsWith(marker)) body.push(lines[i++]!);
-      out.push(...codeBlock(body.join("\n"), lang));
+      out.push(...codeBlock(body.join("\n"), lang, boxW));
       continue;
     }
 
@@ -124,13 +151,17 @@ export function renderMarkdown(src: string, opts: { width?: number } = {}): stri
 
     const heading = line.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
-      const text = inline(heading[2]!);
-      out.push(heading[1]!.length <= 2 ? c.bold.underline(text) : c.bold(text));
+      const level = heading[1]!.length;
+      const text = inline(heading[2]!.trim());
+      // h1/h2: brand, bold, underlined · h3: brand bold · h4+: bold
+      if (level <= 2) out.push(c.hex(BRAND_BLUE).bold.underline(text));
+      else if (level === 3) out.push(c.hex(BRAND_BLUE).bold(text));
+      else out.push(c.bold(text));
       continue;
     }
 
     if (/^\s*([-*_])\s*(\1\s*){2,}$/.test(line)) {
-      out.push(c.gray("─".repeat(40)));
+      out.push(c.gray("─".repeat(Math.min(boxW, 60))));
       continue;
     }
 
@@ -157,11 +188,26 @@ export function renderMarkdown(src: string, opts: { width?: number } = {}): stri
 
     out.push(inline(line));
   }
-  const joined = out.join("\n");
-  const w = opts.width;
-  if (!w) return joined;
-  return joined
-    .split("\n")
-    .flatMap((l) => (l.includes("\x1b") || stringWidth(l) > w - 1 ? wrapAnsiLine(l, w) : [l]))
+
+  // Tidy: right-trim every line, and collapse runs of blank lines to one.
+  const tidy: string[] = [];
+  let blank = false;
+  for (const l of out) {
+    if (l.trim() === "") {
+      if (blank) continue;
+      blank = true;
+      tidy.push("");
+    } else {
+      blank = false;
+      tidy.push(l.replace(/[ \t]+$/, ""));
+    }
+  }
+  while (tidy.length && tidy[0] === "") tidy.shift();
+  while (tidy.length && tidy[tidy.length - 1] === "") tidy.pop();
+
+  // Width-wrap: box lines are already sized to fit, so wrapAnsiLine returns them
+  // intact; only over-long prose/urls actually get broken.
+  return tidy
+    .flatMap((l) => (l.includes("\x1b") || stringWidth(l) > effWidth - 1 ? wrapAnsiLine(l, effWidth) : [l]))
     .join("\n");
 }
