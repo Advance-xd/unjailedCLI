@@ -1,14 +1,14 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { processStatus, runLocalCommand, stopProcess } from "./processes.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 /** The built-in agent tools — a coding-agent toolkit like opencode/claude-code.
  *  Mode ladder (least → most capable):
- *    read  : read-only filesystem + web fetch
- *    cmds  : + run_command (user confirms each)
- *    yolo  : + run_command (no confirm) + write tools
- *  write/edit/write_file always require cmds-or-yolo mode (they change the disk).
+ *    read  : read-only filesystem, clipboard and web fetch
+ *    cmds  : + writes, launches and commands (user confirms each mutation)
+ *    yolo  : same capabilities with explicit automatic approval
  */
 export interface ToolDef {
   type: "function";
@@ -29,7 +29,8 @@ export const MAX_GREP_RESULTS = 100;
 export const WEB_FETCH_MAX_BYTES = 200_000;
 export const WEB_TIMEOUT_MS = 15_000;
 
-export function toolDefinitions(mode: Exclude<ToolsMode, "off">): ToolDef[] {
+export function toolDefinitions(mode: ToolsMode): ToolDef[] {
+  if (mode === "off") return [];
   const defs: ToolDef[] = [
     {
       type: "function",
@@ -89,11 +90,11 @@ export function toolDefinitions(mode: Exclude<ToolsMode, "off">): ToolDef[] {
       type: "function",
       function: {
         name: "clipboard",
-          description: "Read or write the system clipboard. action: 'read' or 'write'; text required for write. Cross-platform.",
+          description: mode === "read" ? "Read the system clipboard. Only action: read is allowed in read mode." : "Read or write the system clipboard. action: read or write; text required for write. Cross-platform.",
           parameters: {
             type: "object",
             properties: {
-              action: { type: "string", description: "'read' or 'write'" },
+              action: { type: "string", enum: mode === "read" ? ["read"] : ["read", "write"] },
               text: { type: "string", description: "Text to write (for write)" },
             },
             required: ["action"],
@@ -118,7 +119,7 @@ export function toolDefinitions(mode: Exclude<ToolsMode, "off">): ToolDef[] {
       type: "function",
       function: {
         name: "open_url",
-        description: "Open a URL (or local file) in the user's default browser.",
+        description: "Open an http/https URL in the user's default browser (requires cmds/yolo permission).",
         parameters: {
           type: "object",
           properties: { url: { type: "string", description: "URL to open" } },
@@ -193,11 +194,12 @@ export function toolDefinitions(mode: Exclude<ToolsMode, "off">): ToolDef[] {
         type: "function",
         function: {
           name: "delete_file",
-          description: "Delete a file or folder — to the OS trash/recycle bin when the platform allows, permanent only as fallback. Requires cmds/yolo mode.",
+          description: "Send a file or folder to the OS trash/recycle bin. If trash is unavailable, returns an error and preserves the file. Permanent deletion requires permanent:true and permission.",
           parameters: {
             type: "object",
             properties: {
               path: { type: "string", description: "File or folder to delete" },
+              permanent: { type: "boolean", description: "Explicitly permanently delete instead of using Trash. Default false." },
             },
             required: ["path"],
           },
@@ -207,12 +209,14 @@ export function toolDefinitions(mode: Exclude<ToolsMode, "off">): ToolDef[] {
         type: "function",
         function: {
           name: "run_command",
-          description: "Run a shell command in the project directory (bash on unix, cmd on Windows). Long timeout — fine for downloads, builds, installs, server setup. Use background:true for long-running processes (servers, daemons); returns immediately with the log path.",
+          description: "Run a shell command (/bin/sh on Unix, cmd.exe on Windows). Supports cwd for another project folder and timeout_ms (up to 600000). Use background:true for servers; returns a job_id for process_status/stop_process.",
           parameters: {
             type: "object",
             properties: {
               command: { type: "string", description: "The command line to run" },
-              background: { type: "boolean", description: "Run detached in the background (for servers/daemons). Returns immediately; output goes to a log file." },
+              background: { type: "boolean", description: "Run in the background for this CLI session. Returns a job ID and bounded log." },
+              cwd: { type: "string", description: "Working directory, including absolute, ~/ and Desktop/Documents shortcuts. Default current directory." },
+              timeout_ms: { type: "integer", minimum: 1, maximum: RUN_TIMEOUT_MS, description: "Foreground timeout in milliseconds (default 600000)." },
             },
             required: ["command"],
           },
@@ -220,7 +224,21 @@ export function toolDefinitions(mode: Exclude<ToolsMode, "off">): ToolDef[] {
       },
     );
   }
-  return defs;
+  defs.push({
+    type: "function",
+    function: {
+      name: "process_status", description: "Read status and recent output for a background job started in this CLI session.",
+      parameters: { type: "object", properties: { job_id: { type: "string" } }, required: ["job_id"] },
+    },
+  });
+  if (mode === "cmds" || mode === "yolo") defs.push({
+    type: "function",
+    function: {
+      name: "stop_process", description: "Stop a background job and its child processes. Only accepts a job_id created by this CLI session.",
+      parameters: { type: "object", properties: { job_id: { type: "string" } }, required: ["job_id"] },
+    },
+  });
+  return mode === "read" ? defs.filter((def) => !["launch_app", "open_url"].includes(def.function.name)) : defs;
 }
 
 export interface ToolResult {
@@ -248,13 +266,16 @@ export function userFolder(name: string): string | null {
 /** Resolve a tool path: supports "Desktop/foo.txt" style shortcuts + ~ expansion,
  *  then falls back to cwd-relative. Windows paths (C:\... or backslashes) resolve
  *  as absolute already. */
-function resolveToolPath(p: string, cwd: string): string {
-  if (p.startsWith("~")) return path.join(os.homedir(), p.slice(1));
+export function resolveToolPath(p: string, cwd: string, platform: NodeJS.Platform = process.platform, home = os.homedir()): string {
+  const paths = platform === "win32" ? path.win32 : path.posix;
+  if (p === "~") return home;
+  if (/^~[\\/]/.test(p)) return paths.resolve(home, p.slice(2));
   const parts = p.split(/[\\\\/]/);
   const firstSeg = parts[0] ?? "";
-  const uf = userFolder(firstSeg);
-  if (uf && parts.length > 1) return path.join(uf, ...parts.slice(1));
-  return path.resolve(cwd, p);
+  const names: Record<string, string> = { desktop: "Desktop", documents: "Documents", downloads: "Downloads", pictures: "Pictures", videos: "Videos", music: "Music" };
+  const folder = names[firstSeg.toLowerCase()];
+  if (folder) return paths.resolve(home, folder, ...parts.slice(1));
+  return paths.resolve(cwd, p);
 }
 
 function clip(s: string, max = MAX_RUN_OUTPUT): string {
@@ -385,27 +406,58 @@ async function webFetch(url: string): Promise<ToolResult> {
   }
 }
 
-function openUrl(url: string): ToolResult {
+async function launchTarget(target: string, app = false): Promise<ToolResult> {
   const plat = process.platform;
-  try {
-    if (plat === "win32") spawn("cmd", ["/c", "start", "", url], { detached: true, stdio: "ignore" }).unref();
-    else if (plat === "darwin") spawn("open", [url], { detached: true, stdio: "ignore" }).unref();
-    else spawn("xdg-open", [url], { detached: true, stdio: "ignore" }).unref();
-    return { ok: true, output: `Opened ${url} in the default browser.` };
-  } catch (e) {
-    return { ok: false, output: `Couldn't open browser: ${(e as Error).message}` };
-  }
+  // Send Windows targets as data, never interpolate them into cmd/PowerShell code.
+  const command = plat === "win32" ? "powershell.exe" : plat === "darwin" ? "open" : app ? target : "xdg-open";
+  const args = plat === "win32"
+    ? ["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; Start-Process -FilePath $env:UNJAILED_OPEN_TARGET"]
+    : plat === "darwin" ? (app ? ["-a", target] : [target]) : app ? [] : [target];
+  return await new Promise((resolve) => {
+    const child = spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true,
+      env: { ...process.env, UNJAILED_OPEN_TARGET: target } });
+    child.once("error", (err) => resolve({ ok: false, output: `Launch failed: ${err.message}` }));
+    if (plat === "linux" && app) {
+      child.once("spawn", () => { child.unref(); resolve({ ok: true, output: `Launched ${target}.` }); });
+    } else {
+      child.once("close", (code) => resolve({ ok: code === 0, output: code === 0 ? `Opened ${target}.` : `Launch failed (exit ${code}): ${target}` }));
+    }
+  });
 }
 
 /* ───────────── main dispatcher ───────────── */
+
+export interface ToolExecutionOptions {
+  mode?: ToolsMode;
+  autoApprove?: boolean;
+  signal?: AbortSignal;
+}
 
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
   cwd: string,
-  approve?: (command: string) => Promise<boolean>,
+  approve?: (action: string) => Promise<boolean>,
+  options: ToolExecutionOptions = {},
 ): Promise<ToolResult> {
   try {
+    const mode = options.mode ?? "read";
+    const known = toolDefinitions("yolo").some((tool) => tool.function.name === name);
+    if (!known) return { ok: false, output: `Unknown tool: ${name}` };
+    if (!toolDefinitions(mode).some((tool) => tool.function.name === name) ||
+      (mode === "read" && name === "clipboard" && args.action !== undefined && args.action !== "read")) {
+      return { ok: false, output: `${name} is unavailable in ${mode} mode. The user must select /tools cmds to allow changes.` };
+    }
+    if (options.signal?.aborted) return { ok: false, output: "Tool cancelled before execution." };
+    const readOnly = ["read_file", "list_dir", "glob", "grep", "web_fetch", "process_status"].includes(name) ||
+      (name === "clipboard" && (args.action === undefined || args.action === "read"));
+    if (!readOnly && mode !== "yolo" && !options.autoApprove) {
+      const action = `${name} ${JSON.stringify(args)}`;
+      if (!approve || !(await approve(action))) return { ok: false, output: "The user declined or approval is unavailable. Nothing executed." };
+    }
+    // An approval can remain on screen while the user cancels the turn.
+    if (options.signal?.aborted) return { ok: false, output: "Tool cancelled before execution." };
+
     if (name === "read_file") {
       const p = String(args.path ?? "");
       if (!p) return { ok: false, output: "path is required" };
@@ -428,12 +480,11 @@ export async function executeTool(
     if (name === "glob") {
       const pattern = String(args.pattern ?? "");
       if (!pattern) return { ok: false, output: "pattern is required" };
-      const base = path.resolve(cwd, String(args.path ?? "."));
+      const base = resolveToolPath(String(args.path ?? "."), cwd);
       // pattern may include a dir prefix; split leading literal dirs off
       const all: string[] = [];
       walkFiles(base, all, { left: 20_000 });
       const re = globToRe(pattern);
-      const baseGlob = pattern.startsWith("/") || pattern.includes(path.sep) ? pattern : pattern;
       const hits = all.filter((f) => {
         const rel = path.relative(base, f).split(path.sep).join("/");
         return re.test(rel) || re.test(rel.split("/").pop() ?? "");
@@ -444,7 +495,7 @@ export async function executeTool(
     if (name === "grep") {
       const pattern = String(args.pattern ?? "");
       if (!pattern) return { ok: false, output: "pattern is required" };
-      const root = path.resolve(cwd, String(args.path ?? "."));
+      const root = resolveToolPath(String(args.path ?? "."), cwd);
       let re: RegExp;
       try { re = new RegExp(pattern); } catch (e) { return { ok: false, output: `Invalid regex: ${(e as Error).message}` }; }
       const onlyGlob = args.glob ? globToRe(String(args.glob)) : null;
@@ -472,31 +523,29 @@ export async function executeTool(
     if (name === "clipboard") {
       const action = String(args.action ?? "read");
       const plat = process.platform;
+      if (action !== "read" && action !== "write") return { ok: false, output: "Clipboard action must be read or write." };
       if (action === "write") {
         const text = String(args.text ?? "");
-        if (!text) return { ok: false, output: "text is required for write" };
+        if (typeof args.text !== "string") return { ok: false, output: "text is required for write" };
         const cmd = plat === "win32"
-          ? `Set-Clipboard -Value ${JSON.stringify(text)}`
+          ? "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())"
           : plat === "darwin" ? "pbcopy" : null;
         if (cmd === null) {
           // linux: try wl-copy then xclip
           for (const c of [["wl-copy"], ["xclip", "-selection", "clipboard"]]) {
             try {
-              const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
-              const r = spawnSync(c[0]!, c.slice(1), { input: text, encoding: "utf8" });
+              const r = spawnSync(c[0]!, c.slice(1), { input: text, encoding: "utf8", timeout: 10_000 });
               if (r.status === 0) return { ok: true, output: "Copied to clipboard." };
             } catch { /* try next */ }
           }
           return { ok: false, output: "No clipboard tool found (install xclip or wl-clipboard)." };
         }
-        const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
         const r = plat === "win32"
-          ? spawnSync("powershell.exe", ["-NoProfile", "-Command", cmd], { encoding: "utf8" })
-          : spawnSync("pbcopy", [], { input: text, encoding: "utf8" });
+          ? spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", cmd], { input: text, encoding: "utf8", timeout: 10_000 })
+          : spawnSync("pbcopy", [], { input: text, encoding: "utf8", timeout: 10_000 });
         return r.status === 0 ? { ok: true, output: "Copied to clipboard." } : { ok: false, output: "Clipboard write failed." };
       }
       // read
-      const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
       const r = plat === "win32"
         ? spawnSync("powershell.exe", ["-NoProfile", "-Command", "Get-Clipboard"], { encoding: "utf8" })
         : plat === "darwin"
@@ -509,18 +558,9 @@ export async function executeTool(
     if (name === "launch_app") {
       const target = String(args.target ?? "");
       if (!target) return { ok: false, output: "target is required" };
-      const plat = process.platform;
-      try {
-        const file = resolveToolPath(target, cwd);
-        const exists = fs.existsSync(file);
-        const arg = exists ? file : target;
-        if (plat === "win32") spawn("cmd", ["/c", "start", "", arg], { detached: true, stdio: "ignore" }).unref();
-        else if (plat === "darwin") spawn("open", [arg], { detached: true, stdio: "ignore" }).unref();
-        else spawn("xdg-open", [arg], { detached: true, stdio: "ignore" }).unref();
-        return { ok: true, output: `Opened ${target}.` };
-      } catch (e) {
-        return { ok: false, output: `Couldn't launch: ${(e as Error).message}` };
-      }
+      const file = resolveToolPath(target, cwd);
+      const exists = fs.existsSync(file);
+      return await launchTarget(exists ? file : target, !exists);
     }
 
     if (name === "move_file") {
@@ -531,6 +571,7 @@ export async function executeTool(
         const src = resolveToolPath(from, cwd);
         const dst = resolveToolPath(to, cwd);
         if (!fs.existsSync(src)) return { ok: false, output: `${from} not found.` };
+        if (fs.existsSync(dst)) return { ok: false, output: `${to} already exists; move refused to avoid overwriting it.` };
         fs.mkdirSync(path.dirname(dst), { recursive: true });
         fs.renameSync(src, dst);
         return { ok: true, output: `Moved ${from} → ${to}.` };
@@ -542,32 +583,34 @@ export async function executeTool(
     if (name === "delete_file") {
       const p2 = String(args.path ?? "");
       if (!p2) return { ok: false, output: "path is required" };
-      if (approve && !(await approve(`delete ${p2}`))) return { ok: false, output: "The user declined." };
       const file = resolveToolPath(p2, cwd);
       if (!fs.existsSync(file)) return { ok: false, output: `${p2} not found.` };
       const plat = process.platform;
-      const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
+      if (args.permanent === true) {
+        fs.rmSync(file, { recursive: true, force: false });
+        return { ok: true, output: `Permanently deleted ${p2}.` };
+      }
       // trash when the platform supports it
       if (plat === "win32") {
         const r = spawnSync("powershell.exe", ["-NoProfile", "-Command",
-          `Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('${file.replace(/'/g, "''")}', 'OnlyErrorDialogs', 'SendToRecycleBin')`], { encoding: "utf8" });
+          `Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::${fs.statSync(file).isDirectory() ? "DeleteDirectory" : "DeleteFile"}('${file.replace(/'/g, "''")}', 'OnlyErrorDialogs', 'SendToRecycleBin')`], { encoding: "utf8" });
         if (r.status === 0) return { ok: true, output: `Sent ${p2} to the Recycle Bin.` };
       } else if (plat === "darwin") {
-        const r = spawnSync("osascript", ["-e", `tell application \"Finder\" to delete POSIX file \"${file}\"`], { encoding: "utf8" });
+        const r = spawnSync("osascript", ["-e", `tell application "Finder" to delete POSIX file ${JSON.stringify(file)}`], { encoding: "utf8" });
         if (r.status === 0) return { ok: true, output: `Sent ${p2} to Trash.` };
       } else {
         const r = spawnSync("gio", ["trash", file], { encoding: "utf8" });
         if (r.status === 0) return { ok: true, output: `Sent ${p2} to trash.` };
       }
-      // fallback: permanent
-      fs.rmSync(file, { recursive: true, force: true });
-      return { ok: true, output: `Deleted ${p2} (no trash available — permanent).` };
+      return { ok: false, output: `Trash unavailable for ${p2}; the file was preserved. Request permanent:true only if the user wants permanent deletion.` };
     }
 
     if (name === "open_url") {
       const url = String(args.url ?? "");
       if (!url) return { ok: false, output: "url is required" };
-      return openUrl(url);
+      const parsed = new URL(url);
+      if (!["http:", "https:"].includes(parsed.protocol)) return { ok: false, output: "open_url accepts http/https only. Use launch_app for local files." };
+      return await launchTarget(parsed.href);
     }
 
     if (name === "web_fetch") {
@@ -580,7 +623,7 @@ export async function executeTool(
       const p = String(args.path ?? "");
       const content = String(args.content ?? "");
       if (!p) return { ok: false, output: "path is required" };
-      if (content.length > MAX_WRITE_BYTES) return { ok: false, output: `Content too large (${content.length} chars, limit ${MAX_WRITE_BYTES})` };
+      if (Buffer.byteLength(content) > MAX_WRITE_BYTES) return { ok: false, output: `Content too large (${content.length} chars, limit ${MAX_WRITE_BYTES})` };
       const file = resolveToolPath(p, cwd);
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, content);
@@ -599,52 +642,23 @@ export async function executeTool(
       if (count === 0) return { ok: false, output: `old_text not found in ${p} — nothing written.` };
       if (count > 1 && !replaceAll) return { ok: false, output: `old_text found ${count} times in ${p} — pass replace_all or make it more specific.` };
       const next = replaceAll ? src.split(oldText).join(newText) : src.replace(oldText, newText);
+      if (Buffer.byteLength(next) > MAX_WRITE_BYTES) return { ok: false, output: `Edited content exceeds ${MAX_WRITE_BYTES} bytes; nothing written.` };
       fs.writeFileSync(file, next);
       return { ok: true, output: count > 1 && !replaceAll ? `Replaced 1 of ${count} occurrences in ${p}` : `Replaced ${replaceAll ? count : 1} occurrence${replaceAll && count > 1 ? "s" : ""} in ${p}` };
     }
 
+    if (name === "process_status") return processStatus(String(args.job_id ?? ""));
+    if (name === "stop_process") return await stopProcess(String(args.job_id ?? ""));
     if (name === "run_command") {
       const command = String(args.command ?? "");
-      const background = args.background === true;
-      if (!command) return { ok: false, output: "command is required" };
-      if (approve && !(await approve(command))) return { ok: false, output: "The user declined to run this command." };
-      if (background) {
-        // detached long-runner (server/daemon): log to file, return immediately
-        const isWin = process.platform === "win32";
-        const logDir = path.join(cwd, ".unjailed");
-        fs.mkdirSync(logDir, { recursive: true });
-        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-        const logFile = path.join(logDir, `bg-${stamp}.log`);
-        try {
-          const out = fs.openSync(logFile, "a");
-          const child = spawn(isWin ? "cmd" : "/bin/sh", isWin ? ["/c", command] : ["-c", command], {
-            cwd, detached: true, stdio: ["ignore", out, out],
-          });
-          child.unref();
-          setTimeout(() => { try { fs.closeSync(out); } catch { /* closed */ } }, 500).unref();
-          return { ok: true, output: `Started in background (pid ${child.pid}). Output: ${path.relative(cwd, logFile)}\nCheck it later with: run_command { "command": "tail -n 50 ${path.relative(cwd, logFile).split(path.sep).join("/")}" }` };
-        } catch (e) {
-          return { ok: false, output: `Failed to start background command: ${(e as Error).message}` };
-        }
+      if (!command.trim()) return { ok: false, output: "command is required" };
+      const timeoutMs = args.timeout_ms === undefined ? RUN_TIMEOUT_MS : args.timeout_ms;
+      if (typeof timeoutMs !== "number" || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > RUN_TIMEOUT_MS) {
+        return { ok: false, output: `timeout_ms must be an integer between 1 and ${RUN_TIMEOUT_MS}.` };
       }
-      return await new Promise<ToolResult>((resolve) => {
-        const isWin = process.platform === "win32";
-        const child = spawn(isWin ? "cmd" : "/bin/sh", isWin ? ["/c", command] : ["-c", command], { cwd });
-        let out = "";
-        let settled = false;
-        const done = (r: ToolResult) => { if (!settled) { settled = true; resolve(r); } };
-        const timer = setTimeout(() => {
-          child.kill("SIGKILL");
-          done({ ok: false, output: clip(squeeze(out)) + `\n…timed out after ${RUN_TIMEOUT_MS / 60000} min (killed). For servers/daemons pass background:true.` });
-        }, RUN_TIMEOUT_MS);
-        child.stdout.on("data", (d) => { out += d.toString(); });
-        child.stderr.on("data", (d) => { out += d.toString(); });
-        child.on("error", (e) => { clearTimeout(timer); done({ ok: false, output: `Failed to start: ${e.message}` }); });
-        child.on("close", (code) => {
-          clearTimeout(timer);
-          done({ ok: code === 0, output: clip(squeeze(out)) || `(no output, exit ${code})` });
-        });
-      });
+      const runCwd = resolveToolPath(String(args.cwd ?? cwd), cwd);
+      if (!fs.statSync(runCwd).isDirectory()) return { ok: false, output: "cwd must be a directory." };
+      return await runLocalCommand(command, runCwd, { background: args.background === true, timeoutMs, signal: options.signal });
     }
 
     return { ok: false, output: `Unknown tool: ${name}` };

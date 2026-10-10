@@ -50,12 +50,12 @@ Type `/` to open the command menu. Use ↑/↓ to move, Enter or Tab to select, 
 | `/model <id>` | Switch straight to a model by its id. |
 | `/effort` | Set reasoning effort: `auto` (default; the model decides), `low`, `medium` or `high`. `/effort high` sets it directly. Remembered between runs. |
 | `/skills` | Switch skills on or off for this chat (Space toggles). `/skills <name>` toggles one; `/skills new <name>` creates one. |
-| `/tools` | Agent tools. No argument: the model can read files and list directories. `cmds` adds run_command (it asks before each run), `yolo` skips asking, `off` disables. |
+| `/tools` | Agent tools. No argument: the model can read files and list directories. `cmds` enables file changes, launches and commands with approval for each action; `yolo` skips asking; `off` disables. |
 | `/api` | Show the base URL, masked key and current model, and run a live connection check. |
 | `/context` | Show token usage for this chat: current context size, the last turn's prompt/completion tokens, message count and model. Numbers come from the API (or a `~` estimate if the server sends none). The context size also shows live in the status line as `ctx 12.4k`. |
 | `/fun` | Toggle the fun effects — the startup wink, side snow and finish sparkle. `/fun off` turns them off; the choice is saved. Effects are off automatically when output is piped, `NO_COLOR` is set, or the terminal is small. |
 | `/update` | Update the CLI to the latest version from npm. |
-| `/auto` (`/bypass`) | Auto-approve tool calls — the agent stops asking and just works. `/auto off` restores confirmations. |
+| `/auto` (`/bypass`) | Auto-approve tool calls — the agent stops asking and just works. `/auto off` restores confirmations in `cmds` mode. It does not expand `read`/`off` permissions; select `/tools cmds` to leave `yolo`. |
 | `/plan` | Plan mode: before writing files or running commands, the agent shows a numbered plan — Enter approves, Esc rejects. `/plan off` disables. |
 | `/resume` | Pick up a previous chat from the current folder. `/resume 2` or `/resume <id>` jumps straight to one. |
 | `/sessions` | Browse saved chats from every folder: resume one, or press `d` to delete it. |
@@ -109,9 +109,9 @@ Windows.
 
 | Mode | What the model can do |
 |---|---|
-| `/tools` | **Read-only:** read files, list directories, glob-find files, grep contents, open urls in your browser, fetch web pages |
-| `/tools cmds` | **+ write:** write files, edit files, run shell commands — you confirm each command with `y` |
-| `/tools yolo` | Same as `cmds`, commands run without confirmation |
+| `/tools` | **Read-only:** read files, list directories, glob-find files, grep contents, read clipboard, fetch web pages, inspect background jobs |
+| `/tools cmds` | **+ write:** write/edit/move/delete files, launch apps, run commands — you confirm each action with `y` |
+| `/tools yolo` | Same as `cmds`, changes and commands run without confirmation |
 | `/tools off` | Plain chat (default) |
 
 The toolkit:
@@ -122,17 +122,43 @@ The toolkit:
 | `list_dir` | List a directory |
 | `glob` | Find files by name pattern (`**/*.ts`) |
 | `grep` | Search file contents, regex, file:line results |
-| `open_url` | Open a url in your default browser |
+| `open_url` | Open an http/https URL in your default browser (cmds/yolo) |
+| `clipboard` | Read clipboard; writes require cmds/yolo |
+| `launch_app` | Open an app or file with the OS (cmds/yolo) |
+| `move_file` | Move/rename without overwriting an existing destination (cmds/yolo) |
+| `delete_file` | Move to Trash; permanent deletion must be explicit (cmds/yolo) |
 | `web_fetch` | Fetch a page/API and read it as text |
 | `write_file` | Create or overwrite a file (cmds/yolo) |
 | `edit_file` | Exact string replace in a file (cmds/yolo) |
-| `run_command` | Shell with a 10-minute timeout (cmds/yolo) |
+| `run_command` | Shell with `cwd`, `timeout_ms` and `background` options (cmds/yolo) |
+| `process_status` | Read a background job's status and recent output |
+| `stop_process` | Stop a background job and its children (cmds/yolo) |
 
-Commands run through `cmd /c` on Windows and `/bin/sh -c` elsewhere, with a
-10-minute timeout (long enough for downloads, builds and server installs) and a
-30 KB output cap. Long-running processes — game servers, daemons — take
-`background: true` and run detached, logging to `.unjailed/bg-*.log`. The choice is saved in your config and
-shown in the status line.
+Commands run through `cmd /d /s /c` on Windows and `/bin/sh -c` elsewhere.
+`run_command` accepts `cwd` so the agent can build and run projects anywhere your
+OS account can access, including folders with spaces. All filesystem tools and
+command directories support `~/` and `Desktop`, `Documents`, or `Downloads`
+shortcuts. This is ordinary local-user access; OS permissions still apply.
+
+In `/tools cmds`, file writes/edits/moves/deletes, clipboard writes, app launches
+and commands require your approval. `/tools read` enforces read-only tools even
+if a model requests an unlisted tool. `/auto` and `/tools yolo` are explicit
+choices to skip prompts; `/auto` cannot unlock capabilities in read/off mode.
+Plan mode requires an approved plan before tasks in cmds/yolo mode; if planning
+fails, execution stops.
+
+Foreground commands default to a 10-minute timeout; `timeout_ms` can shorten it.
+Cancellation and timeouts kill the command's process tree. Output retains a
+bounded tail plus the exit status. For a development server, use
+`background: true`; the returned `job_id` works with `process_status` and
+`stop_process` during the current CLI session. Recent output is saved to
+`.unjailed/bg-*.log` with a 100 KB disk cap. Job controls are not restored after
+restarting the CLI. Use an OS service manager for persistent services.
+
+Example: start with `/tools cmds`, then ask “Create a JavaScript app in my
+Documents/demo folder, run it, and show me the output.” The agent can create,
+edit, execute, inspect and fix the program, with approval for each change or
+command. Use `/auto` only when you want those actions to run without prompts.
 
 ## Keys
 

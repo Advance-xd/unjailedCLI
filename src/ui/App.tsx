@@ -331,7 +331,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         const history: AgentMessage[] = [...baseMessages];
 
         // ── plan mode: mutating jobs get a numbered plan + explicit approval first ──
-        if (planMode === "on" && (toolsMode === "cmds" || toolsMode === "yolo") && /\b(write|edit|create|delete|remove|install|run|fix|refactor|build|deploy|move|rename)\b/i.test(text)) {
+        if (planMode === "on" && (toolsMode === "cmds" || toolsMode === "yolo")) {
           const approved = await planFirst(history, ctrl);
           if (!approved) {
             if (full.trim()) messages.current.push({ role: "assistant", content: full });
@@ -380,13 +380,12 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
           effort: autoEffortFor(text),
           tools: defs,
           execute: (name, args) => executeTool(name, args, process.cwd(), async (command) => {
-            if (yolo) return true;
-            push({ kind: "plain", text: `${theme.warn("Run this command?")}\n  ${command}\n${theme.dim("  y = run · n or Esc = skip")}` });
+            push({ kind: "plain", text: `${theme.warn("Allow this action?")}\n  ${command}\n${theme.dim("  y = run · n or Esc = skip")}` });
             setConfirmingCommand(command);
             const answer = await askYesNo();
             if (!answer) info("Skipped by user.");
             return answer;
-          }),
+          }, { mode: toolsMode, autoApprove: yolo, signal: ctrl.signal }),
         });
         // keep transcript consistent when the final text already streamed
         if (finalText && !full.trim()) { full = finalText; }
@@ -571,7 +570,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     if (next === "" || next === "on" || next === "read") {
       setToolsMode("read");
       writeConfig({ tools: "read" });
-      success("Agent tools on — read files, search, open urls, fetch pages.");
+      success("Agent tools on — read files and clipboard, search, fetch pages.");
       info("Add /tools cmds to also write files and run commands (you confirm each), /tools yolo to skip asking, /tools off to disable.");
       return;
     }
@@ -584,7 +583,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     if (next === "yolo") {
       setToolsMode("yolo");
       writeConfig({ tools: "yolo" });
-      success("Agent tools on — full toolkit, commands run WITHOUT confirmation. You asked for it.");
+      success("Agent tools on — full toolkit, changes and commands run WITHOUT confirmation.");
       return;
     }
     if (next === "off") {
@@ -799,12 +798,11 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
         onToken: (t) => { plan += t; },
       }, ctrl.signal, { effort });
     } catch {
-      // planner failed → fall through to normal flow rather than blocking the user
-      info("Plan draft failed — proceeding without a plan.");
-      return true;
+      info("Plan draft failed — no actions were taken. Retry or use /plan off.");
+      return false;
     }
     const trimmed = plan.trim();
-    if (!trimmed || !/^\s*1[.)]/m.test(trimmed)) return true; // didn't produce a plan; just run
+    if (!trimmed || !/^\s*1[.)]/m.test(trimmed)) { info("No valid plan received — no actions were taken. Retry or use /plan off."); return false; }
     const steps = trimmed.split("\n").map((l) => l.trim()).filter((l) => /^\d+[.)]/.test(l)).slice(0, 8);
     push({ kind: "plain", text: `${theme.bold("Draft plan")}\n${steps.map((s) => "  " + theme.brand(s)).join("\n")}` });
     setMode({ type: "plan-approve", steps, selected: 0 });
@@ -832,13 +830,13 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     if (off) {
       setAutoMode("ask");
       writeConfig({ autoMode: "ask" });
-      success("Auto mode off — run_command asks before executing again.");
+      success("Auto mode off — changes and commands ask for permission again (unless /tools yolo is selected).");
       return;
     }
     setAutoMode("auto");
     writeConfig({ autoMode: "auto" });
     const label = from === "bypass" ? "/bypass" : "/auto";
-    success(`${label} on — the agent runs commands without asking. /auto off to restore confirmations.`);
+    success(`${label} on — the agent makes changes and runs commands without asking. /auto off to restore confirmations.`);
     if (toolsMode !== "cmds" && toolsMode !== "yolo") info("(No commands to auto-run yet — turn on /tools cmds first.)");
   };
 
@@ -853,7 +851,7 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     setPlanMode("on");
     writeConfig({ plan: true });
     success("Plan mode on — the agent drafts a numbered plan before making changes; you approve it.");
-    info("Plan mode applies to jobs that write files or run commands. Reading and searching never needs a plan.");
+    info("Plan approval applies to every task while write/command tools are enabled. /tools read allows inspection without a plan.");
   };
 
   // ---------- /update ----------

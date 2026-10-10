@@ -82,11 +82,12 @@ export function agentSystemPrompt(
     lines.push(
       "- Use edit_file for targeted changes to existing files and write_file for new ones. Always read a file before editing it.",
       "- Verify your work: after editing code, run the build, tests, type-checker, linter, or the program itself with run_command, read the output, and fix anything you broke. The task is not done until it actually runs or passes.",
+      "- run_command accepts cwd (including Desktop/Documents/Downloads and ~/ paths) and timeout_ms. Use background:true for servers; inspect them with process_status and stop only your own jobs with stop_process. Background job controls last for this CLI session.",
       "- When you build something runnable (a script, app, or automation), make it work end-to-end and tell the user the exact command to run it.",
     );
   } else {
     lines.push(
-      "- You are in read-only mode: you can read files, search, fetch pages, and open URLs, but you cannot write files or run commands. If the task needs those, say so and tell the user to turn on `/tools cmds`.",
+      "- You are in read-only mode: you can read files, search, read the clipboard, and fetch pages, but you cannot write files or run commands. If the task needs those, say so and tell the user to turn on `/tools cmds`.",
     );
   }
 
@@ -98,8 +99,8 @@ export function agentSystemPrompt(
     lines.push("", "Commands:", commandGuidance());
     lines.push(
       confirms
-        ? "- Each run_command is shown to the user to approve. Don't assume a command ran until you see its result, and don't batch unrelated steps into one giant command."
-        : "- Commands run automatically without a confirmation prompt. Be deliberate with destructive or irreversible actions (deleting, overwriting, force-pushing) — prefer reversible steps and check paths before you run them.",
+        ? "- Each change, app/browser launch, and command is shown to the user to approve. Don't assume a command ran until you see its result, and don't batch unrelated steps into one giant command."
+        : "- Changes and commands run automatically without a confirmation prompt. Be deliberate with destructive or irreversible actions (deleting, overwriting, force-pushing) — prefer reversible steps and check paths before you run them.",
     );
   }
 

@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { toolDefinitions, executeTool, MAX_READ_BYTES } from "../dist/tools.js";
+import { toolDefinitions, executeTool as executeApprovedTool, MAX_READ_BYTES } from "../dist/tools.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import http from "node:http";
+const executeTool = (name, args, cwd, approve = async () => true) => executeApprovedTool(name, args, cwd, approve, { mode: "cmds" });
 
 function tmp() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "uj-tools-"));
@@ -15,8 +17,8 @@ test("tool definitions by mode", () => {
   const cmds = toolDefinitions("cmds");
   const yolo = toolDefinitions("yolo");
   const names = (d) => d.map((t) => t.function.name);
-  assert.deepEqual(names(read), ["read_file", "list_dir", "glob", "grep", "clipboard", "launch_app", "open_url", "web_fetch"]);
-  assert.deepEqual(names(cmds), ["read_file", "list_dir", "glob", "grep", "clipboard", "launch_app", "open_url", "web_fetch", "write_file", "edit_file", "move_file", "delete_file", "run_command"]);
+  assert.deepEqual(names(read), ["read_file", "list_dir", "glob", "grep", "clipboard", "web_fetch", "process_status"]);
+  assert.deepEqual(names(cmds), ["read_file", "list_dir", "glob", "grep", "clipboard", "launch_app", "open_url", "web_fetch", "write_file", "edit_file", "move_file", "delete_file", "run_command", "process_status", "stop_process"]);
   assert.equal(cmds.length, yolo.length);
 });
 
@@ -78,7 +80,11 @@ test("grep finds content with file:line and honors glob filter", async () => {
 });
 
 test("web_fetch pulls a page and strips html", async () => {
-  const r = await executeTool("web_fetch", { url: "https://example.com" }, process.cwd());
+  const server = http.createServer((_req, res) => { res.setHeader("content-type", "text/html"); res.end("<html><h1>Example Domain</h1></html>"); }).listen(0);
+  await new Promise((resolve) => server.once("listening", resolve));
+  let r;
+  try { r = await executeTool("web_fetch", { url: `http://127.0.0.1:${server.address().port}` }, process.cwd()); }
+  finally { server.closeAllConnections(); server.close(); }
   assert.equal(r.ok, true);
   assert.ok(/Example Domain/i.test(r.output), "body text present");
   assert.ok(r.output.startsWith("HTTP 200"));

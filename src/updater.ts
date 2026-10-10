@@ -32,10 +32,8 @@ export function latestVersion(): Promise<string | null> {
 export function runSelfUpdate(onLine: (line: string) => void): Promise<boolean> {
   return new Promise((resolve) => {
     const pre = preflightWindows();
-    // Always install the latest published version. (This was hardcoded to a
-    // fixed version, which froze /update: it reinstalled the same old build
-    // forever and could even downgrade a newer install.)
-    const args = "install -g unjailed@0.11.2" + (pre ? " --force" : "");  // explicit floor; @latest tag can lag
+    // Release pin is advanced with each published version; registry tags can lag.
+    const args = "install -g unjailed@0.12.0" + (pre ? " --force" : "");  // explicit floor; @latest tag can lag
     const child = spawn(npmCmd() + " " + args, { shell: true });
     let ok = true;
     const t = setTimeout(() => { child.kill("SIGKILL"); ok = false; }, 300_000);
