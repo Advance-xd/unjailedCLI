@@ -4,6 +4,7 @@ import { AbortedError, ApiError, listModels, streamChatRetry, agentTurn, type Ag
 import { COMMANDS, filterCommands, parseCommand } from "../commands.js";
 import { configPath, deleteKey, EFFORTS, maskKey, readConfig, resolveBaseUrl, resolveKey, writeConfig, type Effort, type KeySource } from "../config.js";
 import { executeTool, toolDefinitions } from "../tools.js";
+import { approvalAnswer } from "./approval.js";
 import { currentVersion, latestVersion, runSelfUpdate } from "../updater.js";
 import { recoverAuth, tryClearEnvKeyWindows } from "../auth-recovery.js";
 import { createSkill, loadSkills, projectSkillsDir, skillsSystemPrompt, userSkillsDir, type Skill } from "../skills.js";
@@ -1079,10 +1080,9 @@ export function App({ startup }: { startup?: "continue" | "resume" } = {}) {
     // other keys) keeps waiting. Input in the first 150ms after arming is
     // dropped entirely (submit-Enter echo on windows terminals).
     if (toolAnswerRef.current) {
-      if (Date.now() - toolArmedAt.current < 150) return;
-      const k = (input ?? "").trim().toLowerCase();
-      if (key.escape || k === "n" || k === "no") { toolAnswerRef.current(false); return; }
-      if (k === "y" || k === "yes" || (key.return && !key.shift)) { toolAnswerRef.current(true); return; }
+      const answer = approvalAnswer(input ?? "", key, Date.now() - toolArmedAt.current);
+      if (answer !== undefined) toolAnswerRef.current(answer);
+      if (key.ctrl && input === "c") abortRef.current?.abort();
       return; // any other key: still waiting
     }
     // plan approval: arrow-select Start/Cancel, Enter confirms, Esc = cancel

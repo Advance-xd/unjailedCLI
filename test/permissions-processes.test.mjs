@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { executeTool, resolveToolPath, toolDefinitions } from "../dist/tools.js";
+import { approvalAnswer } from "../dist/ui/approval.js";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function workspace(t) {
@@ -13,6 +14,19 @@ function workspace(t) {
 }
 const approved = (name, args, cwd, options = {}) => executeTool(name, args, cwd, async () => true, { mode: "cmds", ...options });
 const node = `"${process.execPath}"`;
+
+test("terminal approval requires explicit y/yes and ignores Enter echoes", () => {
+  assert.equal(approvalAnswer("", { return: true }, 200), undefined);
+  assert.equal(approvalAnswer("\r", { return: true }, 200), undefined);
+  assert.equal(approvalAnswer("y", {}, 100), undefined);
+  assert.equal(approvalAnswer("y", { meta: true }, 200), undefined);
+  assert.equal(approvalAnswer("y", { ctrl: true }, 200), undefined);
+  assert.equal(approvalAnswer("y", {}, 200), true);
+  assert.equal(approvalAnswer("yes", {}, 200), true);
+  assert.equal(approvalAnswer("n", {}, 200), false);
+  assert.equal(approvalAnswer("", { escape: true }, 200), false);
+  assert.equal(approvalAnswer("c", { ctrl: true }, 0), false);
+});
 
 test("read/off mode boundaries reject unadvertised mutations even with auto approval", async (t) => {
   const dir = workspace(t);
